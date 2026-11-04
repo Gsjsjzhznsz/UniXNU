@@ -118,6 +118,11 @@ jobs:
           python3 scripts/prune_submodules.py uefi board.toml
           # drivers/DarwinBoot is a SUBMODULE OF UniXNU, not of the Aloha tree
           git -C unixnu/drivers/DarwinBoot apply ../../../patches/darwinboot-guacamole.patch
+          # Bring-up diagnostics: after a failed entry UniXNU shows DarwinBoot's
+          # failing step, the UEFI free-memory runs and its last log lines.
+          git -C unixnu apply ../patches/unixnu-diag.patch
+          git -C unixnu/drivers/DarwinBoot apply ../../../patches/darwinboot-diag.patch
+          echo "diagnostic patches applied"
           sed -i 's|^TARGET_DEVICE = .*|TARGET_DEVICE = "${{ inputs.device }}"|' board.toml
           grep -n 'TARGET_DEVICE' board.toml
           # board.toml keeps FDT = raphael.dtb (the real K20 Pro hardware tree),
