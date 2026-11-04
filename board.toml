@@ -72,8 +72,6 @@ kernel_args = [
   "unentitled_ios_sim_launch=1",
   "ignition_level=1",
   "wdt_test=no_user_checkin",
-  "ufsrw=1",
-  "rootrw=1",
   "launchd_unsecure_cache=1",
   "wdt=-1",
   "sweetusb=2",
@@ -81,6 +79,10 @@ kernel_args = [
   # patches/0112: raphael touch (QUP19 I2C, GT9886 Normandy, GPIO54/122/98/100)
   # instead of the sweet board's SE7/GPIO6-9/90 and L11C vote.
   "sweettouchboard=1",
+  # Test boots before the iOS root is flashed: userdata still holds Android.
+  # No ufsrw=1/rootrw=1 (UFS stays read-only) and no persistent console log,
+  # which writes the last 4 MiB + 4 KiB of the partition (patch 0047).
+  "sweetlog=0",
   "sweetfb_noconsole=1",
   "sweetfb_hz=30",
   "sweetgpu=3",
