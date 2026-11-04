@@ -58,7 +58,7 @@ volume = "GUACESP"
 size_mib = 64
 loader = "firmware"
 title = "Redmi K20 Pro - XNU"
-dram_size = "0xbe000000"
+dram_size = "0x3c000000"
 panic_screen = false
 timeout = 3
 kernel_args = [
@@ -98,7 +98,10 @@ unique_chip_id = "required"
 # offset in 32 MiB (0x1004000 for VM_KERNEL_LINK_ADDRESS 0xfffffe0007004000),
 # so 3 GiB overruns that run by ~16 MiB. 0xbe000000 (~2.97 GiB) fits with
 # margin; dram_size above stays equal to it.
-owned_memory_size = "0xbe000000"
+# TEST (2026-11-04): 960 MiB so the window lands below 4 GiB (run 0xc0000000)
+# to tell whether XNU hangs after "VM bootstrap done" only with a window above
+# 4 GiB. The value that fits the high run is 0xbe000000.
+owned_memory_size = "0x3c000000"
 
 [bootimg.image]
 base = 0x0

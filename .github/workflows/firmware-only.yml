@@ -125,6 +125,7 @@ jobs:
           # Reserve the kernel window one memory-map entry at a time: Mu's
           # AllocatePages refuses a range spanning several free entries.
           git -C unixnu/drivers/DarwinBoot apply ../../../patches/darwinboot-window-split.patch
+          git -C unixnu/drivers/DarwinBoot apply ../../../patches/darwinboot-window-below4g.patch
           echo "diagnostic patches applied"
           sed -i 's|^TARGET_DEVICE = .*|TARGET_DEVICE = "${{ inputs.device }}"|' board.toml
           grep -n 'TARGET_DEVICE' board.toml
