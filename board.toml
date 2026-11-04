@@ -78,6 +78,9 @@ kernel_args = [
   "wdt=-1",
   "sweetusb=2",
   "sweettouchdelay=20",
+  # patches/0112: raphael touch (QUP19 I2C, GT9886 Normandy, GPIO54/122/98/100)
+  # instead of the sweet board's SE7/GPIO6-9/90 and L11C vote.
+  "sweettouchboard=1",
   "sweetfb_noconsole=1",
   "sweetfb_hz=30",
   "sweetgpu=3",

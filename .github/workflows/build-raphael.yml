@@ -63,6 +63,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: dipa-studio/ios-sweet
+          # Pinned: patches/0112 is a diff against sweet_touch.c/SweetHID.cpp
+          # as of this commit. Bump deliberately and re-run the verify steps.
+          ref: 45263bee51df4a0f55cdf9c649af886399488ddb
           path: ios-sweet
 
       - name: Fetch darwin-xnu-build at the pinned commit ios-sweet uses
@@ -236,6 +239,27 @@ jobs:
             echo "framebuffer panel: APPLIED"
           else
             echo "::error::0107 was skipped; the panel would not show whether the GUI presents"
+            exit 1
+          fi
+
+      - name: Verify the raphael touch patch landed
+        run: |
+          SRC=dxb/xnu/bsd/dev/sweet_touch.c
+          HID=dxb/xnu/iokit/Kernel/arm/hid/SweetHID.cpp
+          echo "=== source state ==="
+          grep -n 'TOUCH_BOARD_RAPHAEL\]' "$SRC" || echo "(no raphael board entry: 0112 skipped)"
+          grep -n 'fPanelH = ' "$HID" || echo "(HID still assumes 1080x2400: 0112 skipped)"
+          echo "=== kernel strings ==="
+          strings -a raphael/inputs/raphael/kernel.macho | grep -F 'GT9886 Normandy' || true
+          # build.sh only warns when a patch fails. Without 0112 the kernel
+          # ignores sweettouchboard=1 and runs the sweet board code, whose
+          # NORTH-tile writes land on raphael GPIO8 (panel TE), GPIO9 (QUP10)
+          # and GPIO90 (QUP8).
+          if grep -q 'touch_goodix_nor' "$SRC" && grep -q 'fPanelH = ' "$HID" \
+             && strings -a raphael/inputs/raphael/kernel.macho | grep -qF 'selected GT9886 Normandy'; then
+            echo "raphael touch patch: APPLIED"
+          else
+            echo "::error::0112 was skipped; raphael touch would not be built"
             exit 1
           fi
 
