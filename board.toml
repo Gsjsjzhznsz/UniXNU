@@ -83,7 +83,9 @@ kernel_args = [
   # No ufsrw=1/rootrw=1 (UFS stays read-only) and no persistent console log,
   # which writes the last 4 MiB + 4 KiB of the partition (patch 0047).
   "sweetlog=0",
-  "sweetfb_noconsole=1",
+  # No sweetfb_noconsole during bring-up: it mutes the console at the first
+  # framebuffer swap, hiding everything after "SWEET FB". The panel thread
+  # still yields to the GUI once a real frame is presented (FLASH-ROOT.md).
   "sweetfb_hz=30",
   "sweetgpu=3",
   "sweetlogdump=1",
