@@ -1,5 +1,37 @@
 # UniXNU-raphael
 
+## Status of this fork (jackyhowh), 2026-11-05
+
+Tested on a Mi 9T Pro (`raphael`, 6 GB RAM). **iOS 16.7.16 reaches the SpringBoard home screen, and the touchscreen works.**
+
+| Area | State |
+| --- | --- |
+| Boot chain | `fastboot boot` → Project Aloha UEFI → UniXNU menu → DarwinBoot → XNU (ios-sweet `SWEET` kernel, 8 CPUs) |
+| Root | iOS 16.7.16 HFS+ root flashed to `userdata`, mounted read-write ([FLASH-ROOT.md](FLASH-ROOT.md)) |
+| Display | Home screen, status bar, dock and app icons; CPU rendering through the UEFI framebuffer (1080×2340 panel presented as 1125×2436) |
+| Touch | Goodix GT9886 (Normandy protocol) on QUP19 I2C at 0x5d: [patches/0112](patches/0112-raphael-touch-gt9886-normandy.patch), boot-arg `sweettouchboard=1`; taps and swipes reach iOS |
+| Buttons, USB console | Hardware buttons work; the kernel's USB CDC console enumerates (1209:0001). Read it from WSL via usbipd; the Windows `usbser` driver stalls after the first 1 KiB |
+| Not working | GPU acceleration (CPU rendering only); wallpaper and lock screen (black: PosterBoard finds no poster extensions); widgets stay "Waiting…"; Wi-Fi, cellular, audio, camera, sensors |
+
+### Fixes this fork needed (branch [`diag-firmware`](https://github.com/jackyhowh/UniXNU-raphael/tree/diag-firmware))
+
+1. **Firmware without XNU support.** `build-raphael.yml` never adds UniXNU and DarwinBoot to the raphael firmware (the guacamole patch only edits `oneplus-guacamole`), so its image stops at the UEFI recovery screen. Use `firmware-only.yml` with `variant=full`; it reuses an already built kernel.
+2. **Kernel window too large for 6 GB.** The 3 GiB window overran the top of RAM by 16 MiB. `dram_size` = `owned_memory_size` = `0xbe000000` in `board.toml`.
+3. **Window allocation rejected by Mu.** Mu's `ConvertPages` refuses one `AllocatePages` that spans several memory-map entries. `patches/darwinboot-window-split.patch` reserves the window one entry at a time; `darwinboot-window-below4g.patch` prefers a window below 4 GiB.
+4. **Boot hangs right after AppleCLCD starts.** The kernel's CPU driver matches `qcom,kryo470`, but `scripts/devices.py` gave raphael `qcom,kryo485`. The CPUs never started, and XNU waited forever in `PE_lockdown_iokit` for `max_cpus`. Fixed in `devices.py` (the guacamole entry has the same mismatch).
+5. **GUI covered by diagnostics.** Boot-args `sweetfb_noconsole=1` and `sweetpanel=0` stop the text console and the 20-second panel digest from painting over the GUI. Keep `unentitled_ios_sim_launch=1`: without it launchd is killed (CS_KILLED) and the kernel panics.
+
+Build the firmware with the prebuilt kernel (run `41798632101`):
+
+```
+gh workflow run firmware-only.yml -R jackyhowh/UniXNU-raphael --ref diag-firmware \
+  -f variant=full -f device=xiaomi-raphael -f target=RELEASE -f kernel_run_id=41798632101
+```
+
+Upstream text follows.
+
+---
+
 **Boot Apple's XNU (iOS) on the Redmi K20 Pro / Mi 9T Pro (`raphael`, Snapdragon 855 / SM8150) and reach the iOS SpringBoard desktop — from a stock, unlocked phone, with no macOS, no private source, and no manual kernel work.**
 
 This repository is a *turnkey* device port built on the [UniXNU](https://github.com/UniXNU/UniXNU) framework. It reuses the proven **OnePlus 7 Pro (`guacamole`)** SM8150 bring-up (which already reaches the iOS 16.7.x userland) because `raphael` is the **exact same SM8150 silicon** — only the device tree and the panel resolution (1080×2340) differ. The SM8150 XNU kernel and the Project Aloha UEFI are shared, so there is **no per-device kernel defconfig to obtain**.
