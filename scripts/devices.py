@@ -113,7 +113,13 @@ DEVICES = {
         'ufs': 0x01d84000,           # confirmed (ICE at 0x1d90000 too)
         'ufs_size': 0x3000,
         # Kryo 485: 4x A55 (silver) + 3x A76 (gold) + 1x A76 (prime) -- same as guacamole.
-        'cpu_compat': 'qcom,kryo485',
+        # The compatible must still say 'qcom,kryo470': the SWEET kernel's
+        # built-in SweetCPU personality is IONameMatch 'qcom,kryo470'. With
+        # 'qcom,kryo485' no driver binds the cpu nubs, max_cpus is never set,
+        # and the boot thread sleeps forever in PE_lockdown_iokit() ->
+        # ml_wait_max_cpus() right after "SWEET FB" (verified on raphael
+        # 2026-11-05: with kryo470 the kernel goes on and USB enumerates).
+        'cpu_compat': 'qcom,kryo470',
         'cpus': 8,
         'cpu_regs': [0, 0x100, 0x200, 0x300, 0x400, 0x500, 0x600, 0x700],
         'cpu_clocks': [1785600000] * 4 + [2419200000] * 3 + [2841600000],

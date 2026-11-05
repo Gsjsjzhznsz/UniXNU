@@ -75,6 +75,9 @@ kernel_args = [
   "launchd_unsecure_cache=1",
   "wdt=-1",
   "sweetusb=2",
+  # Stream the console to the USB CDC-ACM port (VID 1209 PID 0001, patch 0101);
+  # fastboot-test\watch_usb.ps1 captures it into ios-console.log.
+  "sweetusblog=1",
   "sweettouchdelay=20",
   # patches/0112: raphael touch (QUP19 I2C, GT9886 Normandy, GPIO54/122/98/100)
   # instead of the sweet board's SE7/GPIO6-9/90 and L11C vote.
@@ -89,8 +92,6 @@ kernel_args = [
   "sweetfb_hz=30",
   "sweetgpu=3",
   "sweetlogdump=1",
-  # Name the hanging startup initializer (kprintf before each entry).
-  "startup_debug=1",
 ]
 
 [payload.adt]
