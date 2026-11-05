@@ -48,6 +48,7 @@ PID = 0x0001
 
 OUT = "ios-console.log"
 USE_PYSERIAL = "--pyserial" in sys.argv
+REOPEN_IDLE = 1.0     # seconds without data before the raw port is reopened
 
 GENERIC_READ = 0x80000000
 FILE_SHARE_READ = 0x00000001
@@ -141,6 +142,14 @@ class RawPort:
             raise OSError(ctypes.get_last_error(),
                           "CreateFileW(\\\\.\\%s) failed" % name)
         self.h = h
+        # Without explicit timeouts a ReadFile only completes once the whole
+        # 64 KiB buffer is full; the kernel sends 1 KiB every 100 ms, so every
+        # read timed out and was cancelled. MAXDWORD/MAXDWORD/500 = return as
+        # soon as any byte has arrived, or after 500 ms. SetCommTimeouts is a
+        # local driver setting: unlike SetCommState it sends no USB request.
+        to = (wintypes.DWORD * 5)(0xFFFFFFFF, 0xFFFFFFFF, 500, 0, 0)
+        if not k32.SetCommTimeouts(ctypes.c_void_p(self.h), ctypes.byref(to)):
+            print("SetCommTimeouts failed: %d" % ctypes.get_last_error(), flush=True)
         self.ev = k32.CreateEventW(None, True, False, None)
         if not self.ev:
             k32.CloseHandle(self.h)
@@ -167,7 +176,16 @@ class RawPort:
                     k32.WaitForSingleObject(self.ev, INFINITE)
                     k32.GetOverlappedResult(self.h, ctypes.byref(self.ov),
                                             ctypes.byref(self.nread), False)
-                    return b""
+                    # keep what the cancelled read had already received
+                    return self.buf.raw[:self.nread.value]
+                # completed: the byte count of an overlapped read is only
+                # available from GetOverlappedResult (nread stays 0)
+                if not k32.GetOverlappedResult(self.h, ctypes.byref(self.ov),
+                                               ctypes.byref(self.nread), False):
+                    err = ctypes.get_last_error()
+                    if err in (ERROR_OPERATION_ABORTED, 1167, 6):
+                        raise OSError(err, "the device disappeared")
+                    raise OSError(err, "GetOverlappedResult failed")
             elif err in (ERROR_OPERATION_ABORTED, 1167, 6):
                 raise OSError(err, "the device disappeared")
             else:
@@ -209,6 +227,7 @@ def main():
     print("writing to %s (Ctrl-C to stop), mode: %s"
           % (os.path.abspath(out_path), mode), flush=True)
     total = 0
+    reopened = False
     while True:
         port = want or find_port()
         if not port:
@@ -220,15 +239,28 @@ def main():
             print("open %s failed: %s" % (port, e), flush=True)
             time.sleep(1.0)
             continue
-        print("=== %s open ===" % port, flush=True)
+        if not reopened:
+            print("=== %s open ===" % port, flush=True)
+        reopened = False
+        raw = isinstance(ser, RawPort)
+        idle_since = time.time()
         try:
             while True:
-                buf = ser.read(4096)
+                # RawPort.read takes a timeout in seconds, pyserial a size.
+                buf = ser.read(0.5) if raw else ser.read(4096)
                 if buf:
                     out.write(buf)
                     total += len(buf)
                     sys.stdout.write(buf.decode("utf-8", "replace"))
                     sys.stdout.flush()
+                    idle_since = time.time()
+                elif raw and time.time() - idle_since > REOPEN_IDLE:
+                    # Windows' usbser stops polling bulk IN after one
+                    # completed transfer from this gadget; a fresh open
+                    # makes it read the next one the phone has queued.
+                    ser.close()
+                    reopened = True
+                    break
         except KeyboardInterrupt:
             try:
                 ser.close()
