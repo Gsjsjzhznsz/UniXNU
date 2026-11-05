@@ -82,9 +82,13 @@ kernel_args = [
   # patches/0112: raphael touch (QUP19 I2C, GT9886 Normandy, GPIO54/122/98/100)
   # instead of the sweet board's SE7/GPIO6-9/90 and L11C vote.
   "sweettouchboard=1",
-  # Test boots before the iOS root is flashed: userdata still holds Android.
-  # No ufsrw=1/rootrw=1 (UFS stays read-only) and no persistent console log,
-  # which writes the last 4 MiB + 4 KiB of the partition (patch 0047).
+  # The iOS HFS+ root is flashed to userdata (2026-11-05, user-approved), so the
+  # root is mounted read-write as upstream does. Read-only images for testing
+  # against an Android userdata are ci-artifacts\N-kryo470 and earlier.
+  "ufsrw=1",
+  "rootrw=1",
+  # No persistent console log yet: it writes the last 4 MiB + 4 KiB of the
+  # partition (patch 0047) and reading it back needs a recovery.
   "sweetlog=0",
   # No sweetfb_noconsole during bring-up: it mutes the console at the first
   # framebuffer swap, hiding everything after "SWEET FB". The panel thread
