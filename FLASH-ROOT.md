@@ -1,5 +1,8 @@
 # Flashing the iOS root (HFS+) to raphael
 
+> Written for the iOS 16.7.16 root (branch `ios16-sweet`). The same scripts (`scripts/make_dense.py`, `split_for_abl.py`,
+> `verify_pieces.py`, `flash-root.sh`) flashed the iOS 18.7.8 root built by Renegade; see [docs/IOS18.md](docs/IOS18.md).
+
 ## Why HFS+ and not the SHNGROOT/APFS image
 
 The kernel this port boots is the **SWEET** platform XNU (XNU 8796) built by

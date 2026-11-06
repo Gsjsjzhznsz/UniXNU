@@ -37,7 +37,7 @@ on:
       kernel_run_id:
         description: workflow run that holds the raphael-kernel artifact
         required: false
-        default: "41182305214"
+        default: "41798632101"
       target:
         description: EDK II build target
         required: false
