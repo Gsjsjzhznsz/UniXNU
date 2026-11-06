@@ -73,7 +73,11 @@ class Sparse:
         for _ in range(nch):
             self.f.seek(pos)
             t, _res, a, b = struct.unpack("<HHII", self.f.read(CHUNK_HDR_SZ))
-            if t in (CHUNK_FILL, CHUNK_DONT_CARE):
+            if t == CHUNK_FILL and b == CHUNK_HDR_SZ + 4:
+                # Standard libsparse FILL (Renegade's img2simg): a 4-byte
+                # value follows the header and repeats over every block.
+                blocks, nbytes = a, b
+            elif t in (CHUNK_FILL, CHUNK_DONT_CARE):
                 blocks, nbytes = a, CHUNK_HDR_SZ
             elif b - CHUNK_HDR_SZ == a * self.blk:
                 blocks, nbytes = a, b
@@ -107,9 +111,16 @@ class Sparse:
             if t == CHUNK_RAW:
                 self.f.seek(off + delta * self.blk)
                 out += self.f.read(take * self.blk)
+            elif t == CHUNK_FILL and nbytes == CHUNK_HDR_SZ + 4:
+                out += self.fill_value(off) * (take * self.blk // 4)
             else:
                 out += b"\0" * (take * self.blk)
         return bytes(out)
+
+    def fill_value(self, off):
+        """The 4-byte pattern of the FILL chunk whose data starts at `off`."""
+        self.f.seek(off)
+        return self.f.read(4)
 
 
 def write_chunks(src, out, max_blocks):
@@ -144,15 +155,17 @@ def write_chunks(src, out, max_blocks):
                     out.write(buf)
                     want -= len(buf)
                 left -= take
-        elif t == CHUNK_DONT_CARE:
-            # Store the skipped blocks explicitly, as zeros.
+        elif t == CHUNK_DONT_CARE or (t == CHUNK_FILL and nbytes == CHUNK_HDR_SZ + 4):
+            # Store the skipped blocks explicitly, as zeros; FILL blocks as
+            # their repeated 4-byte value.
+            pattern = zero if t == CHUNK_DONT_CARE else src.fill_value(off) * (len(zero) // 4)
             while left:
                 take = min(left, max_blocks)
                 emit(take)
                 want = take * src.blk
                 while want:
-                    n = min(want, len(zero))
-                    out.write(zero[:n])
+                    n = min(want, len(pattern))
+                    out.write(pattern[:n])
                     want -= n
                 left -= take
         else:
