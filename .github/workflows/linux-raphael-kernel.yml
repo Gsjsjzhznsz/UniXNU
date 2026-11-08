@@ -57,6 +57,16 @@ jobs:
           ref: ${{ inputs.device_ref }}
           path: device
 
+      - name: Host packages
+        # setup-toolchain.py installs these through apt; the cached toolchain
+        # skips that step, so install them unconditionally.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config ninja-build python3 python3-dev \
+            xz-utils libssl-dev zlib1g-dev libbsd-dev uuid-dev llvm-dev libclang-dev \
+            device-tree-compiler git patch flex bison bzip2 cpio rsync curl wget \
+            ca-certificates tcsh unifdef cmake clang lld mtools
+
       - name: Toolchain cache
         id: toolchain-cache
         uses: actions/cache/restore@v4
@@ -110,7 +120,9 @@ jobs:
 
       - name: Build the kernel
         working-directory: unixnu
-        run: ./unixnu build kernel 2>&1 | tee /tmp/kernel.log | tail -80
+        run: |
+          set -euo pipefail
+          ./unixnu build kernel 2>&1 | tee /tmp/kernel.log | tail -80
 
       - name: Report the kernel
         if: always()
