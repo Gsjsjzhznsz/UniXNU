@@ -97,3 +97,27 @@ Work Log:
 Stage Summary:
 - 官方 17.7.11 线的内核构建已在 macos-26 上验证通过；手机侧镜像需自行补齐 firmware/payload/bootimg
   配方（私有输入缺失），Linux 工具链是绕开 Xcode 的可行通道。下一步待用户确认根卷版本与镜像产出方式。
+
+## Task 40 — 文档 Linux 构建链打通（2026-11-09 凌晨）
+
+Agent: Claude (Gsjsjzhznsz session)
+
+Task: 按 unixnu.com 的 Linux 要求文档（guide/requirements#linux）在内核步骤上取代 Xcode。
+
+Work Log:
+- 新增 `.github/workflows/linux-raphael-kernel.yml`（ubuntu-24.04）：检出 UniXNU main（含子模块）
+  + 设备仓库，缓存 `/opt/unixnu-linux`，运行 `scripts/linux/setup-toolchain.py`，再
+  `./unixnu defconfig/fetch/ipsw fetch/build kernel`。
+- 三轮修复：① `kits/XnuPrelink` 等是 git submodule（recursive 检出）；② 缓存命中时 apt 依赖缺失
+  （unifdef）+ `tee|tail` 吞退出码（改 pipefail）；③ 缓存不含 `/usr/bin` 的 xcrun/plutil/codesign
+  shim（改为每次都跑幂等 setup，`--package-manager none`）。
+- run 42510055544 全绿：62 个补丁应用、bootstrap 编译记录、正式编译、`emit_prelink.py` 预链接，
+  产出 `out/raphael/ipados-17.7.11-21H461/raphael/kernel/kernel.macho`，
+  sha256 d611048c598635af41a5d2da4c9caa9377d227d407d602e3150f115c689ddaa2，全程约 4 分钟。
+- 已把 kernel.macho 加进 artifact（run 42510689931 起），供本地 payload/bootimg 打包使用。
+- 设备仓库 README 记录：实体 raphael 已达 iPadOS 17.7.11 Hello UI 与锁屏；官方 device 仓库是
+  compile-only（release_recipe_complete=false），完整 firmware/payload/bootimg 配方与平台种子为私有。
+
+Stage Summary:
+- 内核构建已完全脱离 macOS/Xcode（Linux 工具链 + 4 分钟周转）；剩下 payload/bootimg 配方与
+  17.7.11 根卷两件事。待用户确认根卷来源（A 自行从 IPSW 提取 / B 用户提供）。
