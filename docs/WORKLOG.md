@@ -25,3 +25,22 @@ Work Log:
 Stage Summary:
 - 补丁 = patches/0112-raphael-touch-gt9886-normandy.patch（989 行，19 hunks，
   3 文件）。等待 CI 产物实机验证触摸。
+
+## Task 37 — macos-14 退役迁移 + 触控修复版首次启动（2026-11-08 下午）
+
+Agent: Claude (Gsjsjzhznsz session)
+
+Task: CI kernel job 因 GitHub 退役 macos-14 镜像被秒取消；改用 macos-15 重建并实机验证合并补丁。
+
+Work Log:
+- 对照实验（ubuntu 成功 / macos-14 秒取消，含最小 echo 探针）定位 = runner 镜像退役，非账号/工作流问题。
+- kernel job 切 macos-15（镜像仅 Xcode 16/26，无 15；作业本就 sort -V 取最低版 = 16.0.0）。
+- CI run 42448019354 全链成功：kernel（含"raphael touch patch landed"验证）+ firmware/payload/bootimg。
+- 产物：boot-raphael.img sha256 ff215b6c7901d07075ff3815db4d231d2e4768920e37c319d23c544b61f2a0fa；
+  kernel.macho sha256 1010c6bda3379c1215ab5d481c90a4a4136446607acd5f9893dda4a6be48c2dc。
+- 13:34 fastboot boot：内核 USB 未如上轮在 ~90s 枚举，8 分钟后 USB 完全消失（疑似早期 panic 或触摸线程 panic）。
+- 已准备诊断镜像 touchfix-diag.img（就地等长字节改 unixnu.toml：sweetfb_noconsole=0 屏幕控制台常开、
+  sweetlog=1 持久日志写 userdata 尾部、sweettouchdelay=20→60），回读校验通过；待手机回到可操作状态启动。
+
+Stage Summary:
+- 修改版内核可在 macos-15 CI 完整构建；实机首启动结果待诊断镜像确认。
