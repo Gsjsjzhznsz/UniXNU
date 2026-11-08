@@ -1,0 +1,245 @@
+name: Linux raphael image
+
+# Everything on Linux, per unixnu.com/zh/guide/requirements#linux:
+#   kernel  - ./unixnu build kernel with the scripts/linux toolchain (no Xcode)
+#   image   - our Aloha UEFI firmware + FAT payload + Android boot image packers
+# The kernel job publishes kernel.macho; the image job consumes it exactly like
+# build-raphael.yml consumes the SM8150 kernel artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      device_repository:
+        description: Device repository as owner/name
+        required: true
+        default: Gsjsjzhznsz/UniXNU-raphael
+      device_ref:
+        description: Device repository ref
+        required: true
+        default: main
+      defconfig:
+        description: Defconfig name (configs/ of the device repository)
+        required: true
+        default: raphael_defconfig
+      fetch_ipsw:
+        description: Fetch the IPSW members before building (needed for the prelink)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-raphael-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      UNIXNU_TOOLCHAIN: /opt/unixnu-linux
+      DEFCONFIG: ${{ inputs.defconfig }}
+      CACHE_HINT: llvm-58c46bae-cctools-1030.6.3
+    steps:
+      - name: Check out UniXNU (main carries scripts/unixnu and the Linux toolchain)
+        uses: actions/checkout@v4
+        with:
+          repository: Gsjsjzhznsz/UniXNU
+          ref: main
+          path: unixnu
+          submodules: recursive
+
+      - name: Check out the device repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.device_repository }}
+          ref: ${{ inputs.device_ref }}
+          path: device
+
+      - name: Host packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config ninja-build python3 python3-dev \
+            xz-utils libssl-dev zlib1g-dev libbsd-dev uuid-dev llvm-dev libclang-dev \
+            device-tree-compiler git patch flex bison bzip2 cpio rsync curl wget \
+            ca-certificates tcsh unifdef cmake clang lld mtools
+
+      - name: Toolchain cache
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.UNIXNU_TOOLCHAIN }}
+          key: unixnu-linux-toolchain-${{ env.CACHE_HINT }}
+
+      - name: Install the Linux toolchain
+        working-directory: unixnu
+        run: |
+          set -euo pipefail
+          sudo python3 scripts/linux/setup-toolchain.py "$UNIXNU_TOOLCHAIN" --package-manager none 2>&1 \
+            | tee /tmp/setup-toolchain.log.tail | tail -40
+          test -x "$UNIXNU_TOOLCHAIN/llvm/bin/clang"
+          test -x /usr/bin/xcrun
+
+      - name: Save the toolchain cache
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.UNIXNU_TOOLCHAIN }}
+          key: unixnu-linux-toolchain-${{ env.CACHE_HINT }}
+
+      - name: Use the workspace disk with free space
+        run: |
+          set -euo pipefail
+          df -h / /mnt 2>/dev/null || true
+          if [ -d /mnt ] && [ "$(df --output=avail -k /mnt | tail -1)" -gt "$(df --output=avail -k . | tail -1)" ]; then
+            sudo mkdir -p /mnt/unixnu-out && sudo chown "$USER" /mnt/unixnu-out
+            ln -sfn /mnt/unixnu-out out
+            echo "out -> /mnt/unixnu-out"
+          fi
+
+      - name: Select the device configuration
+        working-directory: unixnu
+        run: |
+          set -euo pipefail
+          ./unixnu defconfig "$DEFCONFIG" -D ../device 2>&1 | tail -20
+          ./unixnu status --json 2>&1 | tee /tmp/status.json | head -40
+
+      - name: Fetch the pinned sources
+        working-directory: unixnu
+        run: ./unixnu fetch 2>&1 | tail -40
+
+      - name: Fetch the IPSW members
+        if: inputs.fetch_ipsw
+        working-directory: unixnu
+        run: |
+          set -euo pipefail
+          ./unixnu ipsw info 2>&1 | tail -20
+          ./unixnu ipsw fetch 2>&1 | tail -40
+
+      - name: Build the kernel
+        working-directory: unixnu
+        run: |
+          set -euo pipefail
+          ./unixnu build kernel 2>&1 | tee /tmp/kernel.log | tail -80
+
+      - name: Stage the kernel for the image job
+        run: |
+          set -euo pipefail
+          kernel=$(find unixnu/out -path '*raphael/kernel/kernel.macho' | head -1)
+          [ -n "$kernel" ] || { echo "::error::no kernel.macho"; exit 1; }
+          mkdir -p staging
+          cp "$kernel" staging/kernel.macho
+          sha256sum staging/kernel.macho
+
+      - name: Upload the kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: raphael-kernel
+          path: staging/kernel.macho
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raphael-linux-kernel-logs
+          path: |
+            /tmp/status.json
+            /tmp/kernel.log
+            /tmp/setup-toolchain.log.tail
+          if-no-files-found: warn
+
+  image:
+    needs: kernel
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the kernel built by the kernel job
+        uses: actions/download-artifact@v4
+        with:
+          name: raphael-kernel
+          path: inputs/raphael
+
+      - name: Checkout UniXNU driver (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/UniXNU
+          ref: b6ae99c17194e6a18fd819d3148e69fe405e91fc
+          path: unixnu
+          submodules: recursive
+
+      - name: Checkout Project Aloha UEFI (SM8150)
+        uses: actions/checkout@v4
+        with:
+          repository: Project-Aloha/mu_aloha_platforms
+          ref: 0b79812897177e9fdd1fb8cb02f05f5338322541
+          path: uefi
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Host tools (EDK2 + UniXNU driver)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build uuid-dev bison flex nasm iasl gcc g++ python3-dev clang lld llvm mtools unzip zip
+          for t in clang lld-link llvm-lib llvm-rc; do
+            if command -v "$t" >/dev/null 2>&1; then echo "have $t"; continue; fi
+            cand=$(ls /usr/lib/llvm-*/bin/"$t" /usr/bin/"$t"-* 2>/dev/null | sort -V | tail -1)
+            if [ -n "$cand" ]; then sudo ln -sf "$cand" "/usr/local/bin/$t"; echo "linked $t -> $cand"; else echo "MISSING $t"; fi
+          done
+          command -v clang lld-link llvm-lib llvm-rc
+          pip install -r unixnu/requirements.txt || true
+
+      - name: Apply the SM8150 patches (vendored in this repo)
+        run: |
+          git -C unixnu apply ../patches/unixnu-guacamole.patch
+          git -C uefi apply ../patches/aloha-guacamole.patch
+          git -C unixnu/drivers/DarwinBoot apply ../../../patches/darwinboot-guacamole.patch
+
+      - name: Fetch raphael DTB (real android-raphael.dtb shipped by Aloha)
+        run: bash scripts/get-raphael-dtb.sh
+
+      - name: Fetch iPhone X (D22AP) base ADT (auto from public IPSW)
+        run: bash scripts/get-base-d22ap.sh
+
+      - name: Fetch the prebuilt BaseCrypto driver (Mu external dependency)
+        run: |
+          DEST=uefi/MU_BASECORE/CryptoPkg/Binaries/edk2-basecrypto-driver-bin_extdep
+          mkdir -p "$DEST"
+          curl -sL -o /tmp/cryptobin.zip \
+            https://github.com/microsoft/mu_crypto_release/releases/download/v1.1.3/Mu_CryptoBin_v1_1_3.zip
+          unzip -q -o /tmp/cryptobin.zip -d "$DEST"
+          ls -l "$DEST/Driver/Bin/CryptoDriver.inc.dsc"
+
+      - name: Build the UEFI firmware volume (SM8150 + xiaomi-raphael device)
+        env:
+          EXTRA_OPTFLAGS: "-Wno-error"
+        run: python3 scripts/build-firmware.py
+
+      - name: Build the FAT payload (kernel + raphael ADT)
+        run: python3 scripts/build-payload.py
+
+      - name: Pack the Android boot image
+        run: python3 scripts/build-bootimg.py
+
+      - name: Report
+        run: cat out/raphael/boot/boot.json
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-build-logs
+          path: out/raphael/logs/
+          if-no-files-found: ignore
+
+      - name: Upload the boot image
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-raphael-linux
+          path: out/raphael/boot/*.img
+          if-no-files-found: error
