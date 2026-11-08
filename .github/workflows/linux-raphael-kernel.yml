@@ -140,8 +140,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: raphael-linux-kernel-logs
+          name: raphael-linux-kernel
           path: |
+            unixnu/out/raphael/*/*/kernel/kernel.macho
             /tmp/status.json
             /tmp/kernel.log
             /tmp/setup-toolchain.log.tail
