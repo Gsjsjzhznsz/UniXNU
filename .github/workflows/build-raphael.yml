@@ -45,11 +45,11 @@ permissions:
 
 jobs:
   kernel:
-    # macos-14 is retired (GitHub removed the image 2026-11); macos-15 still
-    # carries Xcode 16.0, whose iig is the closest to the xnu-8796 IORPC ABI.
-    # The ios-sweet note says Xcode 16 iig emits IORPC.kernelContent which this
-    # xnu lacks -- if the build trips on it, add a shim patch or install Xcode 15.
-    runs-on: macos-15
+    # macos-14 is retired (GitHub removed the image 2026-11). Kernels built by
+    # Xcode 16 on macos-15 boot-panic before SWEET LOG init (bisected 2026-11-08:
+    # identical source boots fine from the last macos-14 build), so go back to a
+    # toolchain with Xcode 15. macos-13 still ships Xcode 15.x.
+    runs-on: macos-13
     timeout-minutes: 240
     env:
       # Without MACOS_VERSION build.sh pops an interactive gum menu and dies
@@ -99,7 +99,8 @@ jobs:
           # build.sh only checks that xcodes exists (Xcode is preinstalled); stub it
           printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
           sudo chmod +x /usr/local/bin/xcodes
-          XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
+          XC=$(ls -d /Applications/Xcode_15*.app 2>/dev/null | sort -V | tail -1)
+          [ -n "$XC" ] || XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1)
           echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
           sudo xcode-select -s "$XC"
           xcodebuild -version
