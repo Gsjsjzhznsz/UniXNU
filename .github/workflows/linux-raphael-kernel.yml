@@ -74,13 +74,17 @@ jobs:
           path: ${{ env.UNIXNU_TOOLCHAIN }}
           key: unixnu-linux-toolchain-${{ env.CACHE_HINT }}
 
-      - name: Install the Linux toolchain (skipped when cached)
-        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+      - name: Install the Linux toolchain
+        # The heavy builds live in the cached prefix, but the script also installs
+        # /usr/bin shims (xcrun, plutil, codesign) that are not cached, so run it on
+        # every job; it skips whatever already exists.
         working-directory: unixnu
         run: |
           set -euo pipefail
-          sudo python3 scripts/linux/setup-toolchain.py "$UNIXNU_TOOLCHAIN" 2>&1 | tee /tmp/setup-toolchain.log.tail | tail -40
+          sudo python3 scripts/linux/setup-toolchain.py "$UNIXNU_TOOLCHAIN" --package-manager none 2>&1 \
+            | tee /tmp/setup-toolchain.log.tail | tail -40
           test -x "$UNIXNU_TOOLCHAIN/llvm/bin/clang"
+          test -x /usr/bin/xcrun
 
       - name: Save the toolchain cache
         if: steps.toolchain-cache.outputs.cache-hit != 'true'
