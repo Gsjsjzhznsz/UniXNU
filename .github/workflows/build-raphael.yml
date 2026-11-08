@@ -49,7 +49,7 @@ jobs:
     # Xcode 16 on macos-15 boot-panic before SWEET LOG init (bisected 2026-11-08:
     # identical source boots fine from the last macos-14 build), so go back to a
     # toolchain with Xcode 15. macos-13 still ships Xcode 15.x.
-    runs-on: macos-13
+    runs-on: macos-15
     timeout-minutes: 240
     env:
       # Without MACOS_VERSION build.sh pops an interactive gum menu and dies
