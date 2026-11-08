@@ -799,13 +799,13 @@ index 27bc49d..a3f0b2d 100644
 -	fOffX = (fLogicalW - 1080) / 2;
 -	fOffY = (fLogicalH - 2400) / 2;
 +	/*
-+	 * Same geometry as SweetFramebuffer.cpp: the boot console is the panel
-+	 * (1080x2400 on sweet, 1080x2340 on raphael), centered in 1125x2436.
++	 * Raphael panel is 1080x2340 (see SweetFramebuffer: AppleCLCD 1080x2340
++	 * stride 4320), centered in the 1125x2436 logical surface. Do NOT call
++	 * PE_current_console() here: SweetHIDTouch::start runs before the boot
++	 * console/log are initialized and a panic there kills the boot silently.
 +	 */
-+	PE_Video video = {};
-+	PE_current_console(&video);
-+	fPanelW = (video.v_width >= 320 && video.v_width <= 1125) ? (int)video.v_width : 1080;
-+	fPanelH = (video.v_height >= 320 && video.v_height <= 2436) ? (int)video.v_height : 2400;
++	fPanelW = 1080;
++	fPanelH = 2340;
 +	fLogicalW = native ? fPanelW : 1125;
 +	fLogicalH = native ? fPanelH : 2436;
 +	fOffX = (fLogicalW - fPanelW) / 2;
