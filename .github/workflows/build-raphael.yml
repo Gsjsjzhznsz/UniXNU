@@ -45,8 +45,11 @@ permissions:
 
 jobs:
   kernel:
-    # XNU 8796 needs Xcode 15 (iig ABI) -> macos-14, like ios-sweet.
-    runs-on: macos-14
+    # macos-14 is retired (GitHub removed the image 2026-11); macos-15 still
+    # carries Xcode 16.0, whose iig is the closest to the xnu-8796 IORPC ABI.
+    # The ios-sweet note says Xcode 16 iig emits IORPC.kernelContent which this
+    # xnu lacks -- if the build trips on it, add a shim patch or install Xcode 15.
+    runs-on: macos-15
     timeout-minutes: 240
     env:
       # Without MACOS_VERSION build.sh pops an interactive gum menu and dies
