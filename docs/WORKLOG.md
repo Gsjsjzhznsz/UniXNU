@@ -121,3 +121,25 @@ Work Log:
 Stage Summary:
 - 内核构建已完全脱离 macOS/Xcode（Linux 工具链 + 4 分钟周转）；剩下 payload/bootimg 配方与
   17.7.11 根卷两件事。待用户确认根卷来源（A 自行从 IPSW 提取 / B 用户提供）。
+
+## Task 41 — 纯 Linux 产出可刷镜像（2026-11-09 早上）
+
+Agent: Claude (Gsjsjzhznsz session)
+
+Task: 用户指示"继续 Linux"：把内核、固件、payload、boot image 全链搬到 Linux。
+
+Work Log:
+- 新增 `.github/workflows/linux-full-image.yml`（workflow_dispatch）：kernel 作业 `./unixnu build kernel`
+  产出 kernel.macho；image 作业复用本项目已验证的 Aloha UEFI 固件、FAT payload、boot image 打包脚本
+  （scripts/build-firmware.py、build-payload.py、build-bootimg.py），无任何 macOS runner。
+- run 42533531578 全绿：kernel + image 两作业均成功，产出 `boot-raphael.img`
+  70,836,224 字节 sha256 537061cbfc751fd360a2fc27a5638750e867aefc1aef3b8bd6b53b024a74de11。
+- 镜像内部校验：boot.json image/dtb/fd 摘要齐备；解出 64 MiB payload，其 kernel.macho 与本次
+  kernel 作业产物 sha256 完全一致（80727c260de0c1bbc6452756f06b3de6b86ee33af247a8cf2234571cfa6bd31e），
+  确认装入的是新内核（ipados-17.7.11 profile，即 iOS 17 代 Darwin 23.6）。
+- 镜像已存 ios16-reference/linux-image/boot-raphael.img；内核存档
+  ios16-reference/raphael-kernel/kernel-ipados-17.7.11.macho（前一轮）。
+
+Stage Summary:
+- Linux 全链产物就绪，可随时 fastboot boot 临时验证。已知不一致：手机 userdata 仍为 16.7.16 根卷，
+  与 Darwin 23.6 内核的代际不匹配，实机首测重点看固件与内核早期启动，不期望用户态成功。
