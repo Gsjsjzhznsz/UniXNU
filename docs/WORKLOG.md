@@ -66,3 +66,34 @@ Work Log:
 
 Stage Summary:
 - 死因假设收敛到 SweetHIDTouch::start 的 PE_current_console 早期调用；修复版与二分版并行构建中。
+
+## Task 39 — UniXNU 官方构建链研究与路线收敛（2026-11-09 凌晨）
+
+Agent: Claude (Gsjsjzhznsz session)
+
+Task: 按用户指示走 UniXNU 文档路线（macos-26 / Xcode 26.6 官方 macOS build workflow），
+研究 raphael 端可达到的实机镜像路径。
+
+Work Log:
+- 上游 `macos.yml`（main 分支）复制到默认分支 raphael-touchfix 后触发；首次失败 =
+  `ModuleNotFoundError: unixnu`，原因是非默认分支缺少 scripts/unixnu 包 → 在 workflow 中
+  固定 `ref: main` 检出 UniXNU（commit c5373a7）。
+- 复跑 run 42499215112：Check inputs / Install tools / **Build kernel 均成功**（./unixnu build kernel，
+  macos-26 + Xcode 26.6，device=Gsjsjzhznsz/UniXNU-raphael, defconfig=raphael_defconfig）。
+  仅最后 Summary 步骤因上游脚本 `xcodebuild -version | head -1` 的 SIGPIPE 崩溃（exit 134），与构建无关。
+- 官方 profile 只有三个：ipados-17.7.11-21H461 / ipados-26.5.2-23F84 / ipados-27.0.1-24A446
+  （profiles/os/*/profile.toml），并且官方 devices.toml 中所有手机移植（Redmi K40、Mi 9、
+  OnePlus 5 等）都使用 ipados-17.7.11-21H461 —— 即 iPadOS 只是内核/ADT/信任缓存输入来源，
+  并非说法上的"iPad"。
+- 设备仓库 UniXNU-raphael README：实机已进入 iPadOS 17.7.11 Hello UI 与锁屏（2026-11-07），
+  触摸（GT9889）与图标主屏未验证；打包为 compile-only，release_recipe_complete=false，
+  完整 firmware/payload/bootimg 配方与私有输入（平台种子、固件、镜像）不入库。
+- xnu-8796 线：上游 ios-sweet 的 CI 注释同样确认 Xcode 16 的 iig 与 8796 IORPC ABI 不兼容，
+  macos-14 退役后无法再产出可启动内核（本日二分已实机证伪 Xcode 16.0/16.4 构建）。
+- 上游 UniXNU 提供完整 Linux 构建支持：scripts/linux/setup-toolchain.py（自建 clang、
+  iig-port-darwin-target.patch、prepare-xnu.py 的源码改写、compiler-rt libcc_kext）——
+  文档明确 kernel/package/firmware/payload/bootimg 均可在 Linux 主机执行。
+
+Stage Summary:
+- 官方 17.7.11 线的内核构建已在 macos-26 上验证通过；手机侧镜像需自行补齐 firmware/payload/bootimg
+  配方（私有输入缺失），Linux 工具链是绕开 Xcode 的可行通道。下一步待用户确认根卷版本与镜像产出方式。
