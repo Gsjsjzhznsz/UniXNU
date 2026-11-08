@@ -1,0 +1,129 @@
+name: Linux raphael kernel
+
+# Documented Linux path (unixnu.com/zh/guide/requirements#linux): the kernel step uses
+# upstream clang and an open Mach-O toolchain instead of Xcode. This workflow installs
+# the toolchain once, caches it, and builds the raphael kernel with ./unixnu.
+
+on:
+  workflow_dispatch:
+    inputs:
+      device_repository:
+        description: Device repository as owner/name
+        required: true
+        default: Gsjsjzhznsz/UniXNU-raphael
+      device_ref:
+        description: Device repository ref
+        required: true
+        default: main
+      defconfig:
+        description: Defconfig name (configs/ of the device repository)
+        required: true
+        default: raphael_defconfig
+      fetch_ipsw:
+        description: Fetch the IPSW members before building (needed for the prelink)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-raphael-kernel-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      UNIXNU_TOOLCHAIN: /opt/unixnu-linux
+      DEFCONFIG: ${{ inputs.defconfig }}
+      CACHE_HINT: llvm-58c46bae-cctools-1030.6.3
+    steps:
+      - name: Check out UniXNU (main carries scripts/unixnu and the Linux toolchain)
+        uses: actions/checkout@v4
+        with:
+          repository: Gsjsjzhznsz/UniXNU
+          ref: main
+          path: unixnu
+
+      - name: Check out the device repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.device_repository }}
+          ref: ${{ inputs.device_ref }}
+          path: device
+
+      - name: Toolchain cache
+        id: toolchain-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.UNIXNU_TOOLCHAIN }}
+          key: unixnu-linux-toolchain-${{ env.CACHE_HINT }}
+
+      - name: Install the Linux toolchain (skipped when cached)
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        working-directory: unixnu
+        run: |
+          set -euo pipefail
+          sudo python3 scripts/linux/setup-toolchain.py "$UNIXNU_TOOLCHAIN" 2>&1 | tee /tmp/setup-toolchain.log.tail | tail -40
+          test -x "$UNIXNU_TOOLCHAIN/llvm/bin/clang"
+
+      - name: Save the toolchain cache
+        if: steps.toolchain-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.UNIXNU_TOOLCHAIN }}
+          key: unixnu-linux-toolchain-${{ env.CACHE_HINT }}
+
+      - name: Use the workspace disk with free space
+        run: |
+          set -euo pipefail
+          df -h / /mnt 2>/dev/null || true
+          if [ -d /mnt ] && [ "$(df --output=avail -k /mnt | tail -1)" -gt "$(df --output=avail -k . | tail -1)" ]; then
+            sudo mkdir -p /mnt/unixnu-out && sudo chown "$USER" /mnt/unixnu-out
+            ln -sfn /mnt/unixnu-out out
+            echo "out -> /mnt/unixnu-out"
+          fi
+
+      - name: Select the device configuration
+        working-directory: unixnu
+        run: |
+          set -euo pipefail
+          ./unixnu defconfig "$DEFCONFIG" -D ../device 2>&1 | tail -20
+          ./unixnu status --json 2>&1 | tee /tmp/status.json | head -40
+
+      - name: Fetch the pinned sources
+        working-directory: unixnu
+        run: ./unixnu fetch 2>&1 | tail -40
+
+      - name: Fetch the IPSW members
+        if: inputs.fetch_ipsw
+        working-directory: unixnu
+        run: |
+          set -euo pipefail
+          ./unixnu ipsw info 2>&1 | tail -20
+          ./unixnu ipsw fetch 2>&1 | tail -40
+
+      - name: Build the kernel
+        working-directory: unixnu
+        run: ./unixnu build kernel 2>&1 | tee /tmp/kernel.log | tail -80
+
+      - name: Report the kernel
+        if: always()
+        working-directory: unixnu
+        run: |
+          set -euo pipefail
+          find out -name 'kernel.macho' -o -name 'kernel.macho.*' 2>/dev/null | head
+          find out -path '*kernel*' -name '*.macho' -exec sha256sum {} \; 2>/dev/null | head
+
+      - name: Upload the kernel and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raphael-linux-kernel-logs
+          path: |
+            /tmp/status.json
+            /tmp/kernel.log
+            /tmp/setup-toolchain.log.tail
+          if-no-files-found: warn
