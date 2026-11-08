@@ -91,6 +91,10 @@ jobs:
       - name: Check out UniXNU
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # This fork's default branch (raphael-touchfix) carries the SM8150 bring-up
+          # workflows but does not ship the scripts/unixnu python package; the
+          # upstream main branch does. The device bring-up proceeds from upstream.
+          ref: main
           persist-credentials: false
 
       - name: Check out the device repository
