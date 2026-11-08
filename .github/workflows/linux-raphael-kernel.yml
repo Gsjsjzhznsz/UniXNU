@@ -46,6 +46,9 @@ jobs:
           repository: Gsjsjzhznsz/UniXNU
           ref: main
           path: unixnu
+          # kits/XnuPrelink (prelink patches) and drivers/* (ArmDTPlatform,
+          # DarwinBoot) are submodules; the device patch series references them.
+          submodules: recursive
 
       - name: Check out the device repository
         uses: actions/checkout@v4
