@@ -44,3 +44,25 @@ Work Log:
 
 Stage Summary:
 - 修改版内核可在 macos-15 CI 完整构建；实机首启动结果待诊断镜像确认。
+
+## Task 38 — 静默早期死亡定位 + SweetHID PE_current_console 修复（2026-11-08 傍晚）
+
+Agent: Claude (Gsjsjzhznsz session)
+
+Task: 诊断 13:34/15:41 两次新内核启动 USB 零枚举且无 fastboot 回落的原因。
+
+Work Log:
+- 15:41 启动诊断镜像（noconsole=0/log=1/delay=60）后现象与 13:34 相同；"ffu/devicerecovery" 画面实为
+  内核挂死 + wdt=-1 无看门狗导致屏幕常亮至电池深度耗电后的厂商底层画面，非固件损坏。
+- TWRP 拉取 userdata 尾部 4100KiB（sweet-tail-1545.bin，sha256 de7c82b9…）:全卷仅 1 个 SWEETLOG 头，
+  内容为昨晚成功启动的完整日志（含干净 shutdown）→ 两次新内核启动均死在 SWEET LOG 初始化之前，
+  早于屏幕控制台，故无任何可见输出。
+- A/B 对照：artifacts/boot-fb060ad（昨晚成功内核）fastboot boot，~2 分钟 USB 枚举正常 → 硬件无恙。
+- 变量二分：合并补丁 vs macos-15/Xcode16 工具链。推送 raphael-xcode16-bisect（=583bf5c 无合并补丁）
+  触发 run 42461507109；同时审查合并补丁发现 SweetHIDTouch::start()（早于日志初始化执行）新增的
+  PE_current_console() 调用为最高嫌疑（panic 即静默早死，与全部现象吻合）。
+- 修复 7054c0e：删除该调用，硬编码 raphael 面板 1080x2340（与 SweetFramebuffer 探测输出一致），
+  触发修复版 run 42461623732。两 run 结果将决定后续（若 bisect 也不启动则问题在工具链）。
+
+Stage Summary:
+- 死因假设收敛到 SweetHIDTouch::start 的 PE_current_console 早期调用；修复版与二分版并行构建中。
