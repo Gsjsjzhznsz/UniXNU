@@ -1,0 +1,103 @@
+name: iOS 18 root (Renegade)
+
+# Builds the iOS 18.7.8 (22H352, iPhone11,8) HFS+ root that Heartwood boots from userdata.
+# tools/renegade/README.md, "Platforms": on Linux the image is mounted through a loop
+# device, so the job runs on ubuntu (passwordless sudo) with apfs-fuse for the IPSW dmgs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      size:
+        description: Root image size passed to Renegade
+        required: false
+        default: "20g"
+      jobs:
+        description: Parallel copy jobs (empty = nproc)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios18-root-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RENEGADE_TARGET: ios18
+
+jobs:
+  root:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Move Renegade's research dir to the big disk
+        run: |
+          set -euo pipefail
+          df -h / /mnt || true
+          sudo mkdir -p /mnt/renegade-research && sudo chown "$USER" /mnt/renegade-research
+          rm -rf research && ln -s /mnt/renegade-research research
+
+      - name: Host packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3 curl hfsprogs util-linux zstd dropbear-bin \
+            cmake g++ git libfuse3-dev libbz2-dev zlib1g-dev libattr1-dev fuse3 \
+            pkg-config libtool autoconf
+          sudo modprobe hfsplus && grep hfsplus /proc/filesystems || true
+
+      - name: Build apfs-fuse (reads the IPSW dmgs)
+        run: |
+          set -euo pipefail
+          git clone -q --recursive https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
+          cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -DCMAKE_BUILD_TYPE=Release >/tmp/apfs-cmake.log
+          make -C /tmp/apfs-fuse/build -j"$(nproc)" >/tmp/apfs-make.log 2>&1 || { tail -40 /tmp/apfs-make.log; exit 1; }
+          sudo install /tmp/apfs-fuse/build/apfs-fuse /usr/local/bin/
+          command -v apfs-fuse && apfs-fuse --help >/dev/null 2>&1 || true
+
+      - name: Install the ipsw CLI (partial IPSW download + AEA decryption)
+        run: |
+          set -euo pipefail
+          curl -sL https://api.github.com/repos/blacktop/ipsw/releases/latest -o /tmp/ipsw.json
+          URL=$(python3 - <<'PY'
+          import json
+          r = json.load(open('/tmp/ipsw.json'))
+          for a in r['assets']:
+              n = a['name']
+              if 'linux_x86_64' in n and n.endswith('.tar.gz'):
+                  print(a['browser_download_url']); break
+          PY
+          )
+          [ -n "$URL" ] || { echo "no ipsw linux asset"; exit 1; }
+          curl -sL --retry 3 "$URL" -o /tmp/ipsw.tgz
+          sudo tar xzf /tmp/ipsw.tgz -C /usr/local/bin --strip-components=1 $(tar tzf /tmp/ipsw.tgz | head -1)
+          command -v ipsw && ipsw version 2>/dev/null | head -1
+
+      - name: Fetch the encrypted root and cryptex dmgs
+        run: |
+          set -euo pipefail
+          tools/renegade/renegade fetch 2>&1 | tail -30
+          du -sh research/* 2>/dev/null | head
+
+      - name: Build the root image
+        run: |
+          set -euo pipefail
+          JOBS="${{ inputs.jobs }}"
+          [ -n "$JOBS" ] || JOBS="$(nproc)"
+          tools/renegade/renegade root --delete-sources --size "${{ inputs.size }}" --jobs "$JOBS" 2>&1 | tail -80
+          find research -maxdepth 3 -name '*.img' -o -maxdepth 3 -name '*.simg' | while read -r f; do
+            ls -l "$f"; sha256sum "$f"
+          done
+
+      - name: Upload the root image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios18-root
+          path: |
+            research/ios18/**
+            !research/ios18/ipsw/**
+          if-no-files-found: warn
+          compression-level: 0
