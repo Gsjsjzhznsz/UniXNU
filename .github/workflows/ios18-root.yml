@@ -95,13 +95,31 @@ jobs:
             ls -l "$f"; sha256sum "$f"
           done
 
+      - name: Pack and upload the root image
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "=== files ==="
+          find research -maxdepth 4 -type f \( -name '*.img' -o -name '*.simg' \) -exec ls -l {} \; || true
+          mkdir -p /tmp/upload
+          # A 20 GiB raw image does not fit an artifact: prefer the Android sparse image,
+          # otherwise compress the raw one.
+          simg=$(find research -name '*.simg' -type f | head -1)
+          if [ -n "$simg" ]; then
+            zstd -q -T0 -6 "$simg" -o /tmp/upload/root.simg.zst
+          else
+            raw=$(find research -name '*.img' -type f | head -1)
+            [ -n "$raw" ] || { echo "no root image"; exit 1; }
+            zstd -q -T0 -6 "$raw" -o /tmp/upload/root.img.zst
+          fi
+          ls -l /tmp/upload
+          sha256sum /tmp/upload/*
+
       - name: Upload the root image
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ios18-root
-          path: |
-            research/ios18/**
-            !research/ios18/ipsw/**
+          path: /tmp/upload/*
           if-no-files-found: warn
           compression-level: 0
