@@ -91,7 +91,7 @@ jobs:
           # Linux builds the image through a loop device and mount(8): run as root.
           sudo -E bash tools/renegade/renegade root --delete-sources --size "${{ inputs.size }}" --jobs "$JOBS" 2>&1 | tail -80
           sudo chown -R "$USER" research
-          find research -maxdepth 3 -name '*.img' -o -maxdepth 3 -name '*.simg' | while read -r f; do
+          find -L research -maxdepth 4 -name '*.img' -o -maxdepth 3 -name '*.simg' | while read -r f; do
             ls -l "$f"; sha256sum "$f"
           done
 
@@ -100,15 +100,15 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== files ==="
-          find research -maxdepth 4 -type f \( -name '*.img' -o -name '*.simg' \) -exec ls -l {} \; || true
+          find -L research -maxdepth 5 -type f \( -name '*.img' -o -name '*.simg' \) -exec ls -l {} \; || true
           mkdir -p /tmp/upload
           # A 20 GiB raw image does not fit an artifact: prefer the Android sparse image,
           # otherwise compress the raw one.
-          simg=$(find research -name '*.simg' -type f | head -1)
+          simg=$(find -L research -name '*.simg' -type f | head -1)
           if [ -n "$simg" ]; then
             zstd -q -T0 -6 "$simg" -o /tmp/upload/root.simg.zst
           else
-            raw=$(find research -name '*.img' -type f | head -1)
+            raw=$(find -L research -name '*.img' -type f | head -1)
             [ -n "$raw" ] || { echo "no root image"; exit 1; }
             zstd -q -T0 -6 "$raw" -o /tmp/upload/root.img.zst
           fi
