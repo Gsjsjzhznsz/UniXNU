@@ -39,6 +39,8 @@ jobs:
           df -h / /mnt || true
           sudo mkdir -p /mnt/renegade-research && sudo chown "$USER" /mnt/renegade-research
           rm -rf research && ln -s /mnt/renegade-research research
+          # The repository stores the Renegade entry points without the executable bit.
+          chmod +x tools/renegade/renegade tools/renegade/*.sh
 
       - name: Host packages
         run: |
@@ -78,7 +80,7 @@ jobs:
       - name: Fetch the encrypted root and cryptex dmgs
         run: |
           set -euo pipefail
-          tools/renegade/renegade fetch 2>&1 | tail -30
+          bash tools/renegade/renegade fetch 2>&1 | tail -30
           du -sh research/* 2>/dev/null | head
 
       - name: Build the root image
@@ -86,7 +88,7 @@ jobs:
           set -euo pipefail
           JOBS="${{ inputs.jobs }}"
           [ -n "$JOBS" ] || JOBS="$(nproc)"
-          tools/renegade/renegade root --delete-sources --size "${{ inputs.size }}" --jobs "$JOBS" 2>&1 | tail -80
+          bash tools/renegade/renegade root --delete-sources --size "${{ inputs.size }}" --jobs "$JOBS" 2>&1 | tail -80
           find research -maxdepth 3 -name '*.img' -o -maxdepth 3 -name '*.simg' | while read -r f; do
             ls -l "$f"; sha256sum "$f"
           done
