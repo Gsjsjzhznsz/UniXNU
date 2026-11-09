@@ -15,6 +15,10 @@ on:
         description: Parallel copy jobs (empty = nproc)
         required: false
         default: ""
+      gpu_firmware_url:
+        description: Release tag or directory URL with the GPU firmware (empty = skip)
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -94,6 +98,30 @@ jobs:
           find -L research -maxdepth 4 -name '*.img' -o -maxdepth 3 -name '*.simg' | while read -r f; do
             ls -l "$f"; sha256sum "$f"
           done
+
+      - name: Inject the GPU firmware into the root
+        if: inputs.gpu_firmware_url != ''
+        run: |
+          set -euo pipefail
+          RAW=$(find -L research -name 'root.img' -type f | head -1)
+          [ -n "$RAW" ] || { echo "no root.img yet"; exit 1; }
+          mkdir -p /tmp/gpufw
+          gh release download "${{ inputs.gpu_firmware_url }}" \
+            --repo "${{ github.repository }}" -D /tmp/gpufw --clobber
+          ls -l /tmp/gpufw
+          MNT=/mnt/renegade-research/gpufw-mnt
+          mkdir -p "$MNT"
+          sudo modprobe hfsplus
+          DEV=$(sudo losetup --find --show "$RAW")
+          sudo mount -t hfsplus -o rw,force "$DEV" "$MNT"
+          sudo mkdir -p "$MNT/usr/local/share/firmware"
+          sudo cp /tmp/gpufw/* "$MNT/usr/local/share/firmware/"
+          sudo chown 0:0 "$MNT/usr/local/share/firmware"/*
+          sudo chmod 644 "$MNT/usr/local/share/firmware"/*
+          ls -l "$MNT/usr/local/share/firmware/"
+          sync
+          sudo umount "$MNT"
+          sudo losetup -d "$DEV"
 
       - name: Pack and upload the root image
         if: always()
