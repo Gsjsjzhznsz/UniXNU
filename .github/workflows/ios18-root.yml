@@ -104,7 +104,16 @@ jobs:
         run: |
           set -euo pipefail
           RAW=$(find -L research -name 'root.img' -type f | head -1)
-          [ -n "$RAW" ] || { echo "no root.img yet"; exit 1; }
+          if [ -z "$RAW" ]; then
+            # The simg stage leaves only the Android sparse image; expand it, inject, and let
+            # the pack step compress the raw image instead.
+            SIMG=$(find -L research -name '*.simg' -type f | head -1)
+            [ -n "$SIMG" ] || { echo "no root image in research/"; exit 1; }
+            RAW="${SIMG%.simg}.img"
+            python3 tools/renegade/simg2img.py "$SIMG" "$RAW"
+            rm -f "$SIMG"
+          fi
+          [ -f "$RAW" ] || { echo "no root.img"; exit 1; }
           mkdir -p /tmp/gpufw
           gh release download "${{ inputs.gpu_firmware_url }}" \
             --repo "${{ github.repository }}" -D /tmp/gpufw --clobber
