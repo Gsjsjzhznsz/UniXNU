@@ -66,16 +66,13 @@ jobs:
           r = json.load(open('/tmp/ipsw.json'))
           for a in r['assets']:
               n = a['name']
-              if 'linux_x86_64' in n and n.endswith('.tar.gz'):
+              if n.startswith('ipsw_') and 'linux_x86_64' in n and n.endswith('.deb'):
                   print(a['browser_download_url']); break
           PY
           )
-          [ -n "$URL" ] || { echo "no ipsw linux asset"; exit 1; }
-          curl -sL --retry 3 "$URL" -o /tmp/ipsw.tgz
-          mkdir -p /tmp/ipsw-bin && tar xzf /tmp/ipsw.tgz -C /tmp/ipsw-bin
-          BIN=$(find /tmp/ipsw-bin -type f -name ipsw | head -1)
-          [ -n "$BIN" ] || { echo "no ipsw binary in the archive"; find /tmp/ipsw-bin | head; exit 1; }
-          sudo install -m 0755 "$BIN" /usr/local/bin/ipsw
+          [ -n "$URL" ] || { echo "no ipsw linux .deb asset"; exit 1; }
+          curl -sL --retry 3 "$URL" -o /tmp/ipsw.deb
+          sudo apt-get install -y -qq /tmp/ipsw.deb
           command -v ipsw && (ipsw version 2>/dev/null | head -1 || ipsw --version | head -1)
 
       - name: Fetch the encrypted root and cryptex dmgs
