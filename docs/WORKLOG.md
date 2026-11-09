@@ -143,3 +143,33 @@ Work Log:
 Stage Summary:
 - Linux 全链产物就绪，可随时 fastboot boot 临时验证。已知不一致：手机 userdata 仍为 16.7.16 根卷，
   与 Darwin 23.6 内核的代际不匹配，实机首测重点看固件与内核早期启动，不期望用户态成功。
+
+## Task 42 — iOS 18 实机启动成功，触摸可用（2026-11-09 深夜）
+
+Agent: Claude (Gsjsjzhznsz session)
+
+Task: 按用户指示转向上游其他 fork（jackyhowh 的 iOS 18 路线），实机验证启动与触摸。
+
+Work Log:
+- 发现并采用 jackyhowh/UniXNU-raphael 的 Bergamota iOS 18 路线：xnu-11215.81.4（Heartwood，SWEET）
+  + macos-15/Xcode 16.2 内核构建 + Project Aloha UEFI + Renegade 根卷。
+- 内核：fork main 同步上游后 xnu.yml 构建成功（run 42536678442），kernel.development.sweet
+  sha256 205ad0dc…（19,005,008 字节）。
+- 固件/基础镜像：firmware-only.yml（run 42538389077，UEI ref 0b79812…，RELEASE）成功；修了
+  xnu.yml 产物名 kernel.development.sweet → kernel.macho 的映射。
+- ADT：tools/mkadt.py --board raphael，补了 repo 缺失的 tools/remotezip.py 并从 Apple 公共
+  16.7.16 IPSW 取 D22AP 基树；raphael.adt sha256 3f89931e…（12,964 字节）。
+- 启动镜像：mkboot-raphael.sh 装入内核 + ADT + iOS 18 boot args（sweetgpu=8 sweetgpuwait=1800
+  sweetgpufreq=g sweetfb_hz=60），RW 版 sha256 94ed68c3…。
+- 根卷：新写 ios18-root.yml 在 ubuntu-24.04 上按 Renegade Linux 文档构建（run 42624403683 成功）：
+  11.5GB dmgs 拉取解密、20G HFSX 镜像、2718 个 Mach-O arm64e→arm64、dyld cache、验证通过；
+  root.simg.zst sha256 cb29f6aa…。期间修复 6 处上游 Linux 路径缺口（/bin/sh、sudo、remotezip、
+  ipsw deb、find -L、以及用 release 分片绕开单条 Wi-Fi 上行限制，见 docs/IOS18.md）。
+- 实机：TWRP 中把 20GB 原始镜像流式写入 /dev/block/sda31（37 MiB/s，553s），fastboot boot
+  boot-raphael-ios18-rw.img → 约 35 秒 USB 1209:0001 枚举；内核 UDP 日志（5140）显示
+  containermanagerd_system、securityd、passd、WirelessRadioManagerd、xpcproxy 等服务正常启动；
+  屏幕显示 iOS 主屏，**触摸可滑动、可点图标**（GT9886，patch 0260）。
+
+Stage Summary:
+- 目标达成：Redmi K20 Pro 实机启动 iOS 18.7.8 到主屏，触摸交互验证通过，全程 boot/dtbo 未写，
+  仅 fastboot boot 临时启动（userdata 写入根卷已获用户事先授权）。
