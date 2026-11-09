@@ -103,6 +103,7 @@ jobs:
         if: inputs.gpu_firmware_url != ''
         run: |
           set -euo pipefail
+          sudo chown -R "$USER" /mnt/renegade-research
           RAW=$(find -L research -name 'root.img' -type f | head -1)
           if [ -z "$RAW" ]; then
             # The simg stage leaves only the Android sparse image; expand it, inject, and let
