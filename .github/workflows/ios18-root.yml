@@ -72,8 +72,11 @@ jobs:
           )
           [ -n "$URL" ] || { echo "no ipsw linux asset"; exit 1; }
           curl -sL --retry 3 "$URL" -o /tmp/ipsw.tgz
-          sudo tar xzf /tmp/ipsw.tgz -C /usr/local/bin --strip-components=1 $(tar tzf /tmp/ipsw.tgz | head -1)
-          command -v ipsw && ipsw version 2>/dev/null | head -1
+          mkdir -p /tmp/ipsw-bin && tar xzf /tmp/ipsw.tgz -C /tmp/ipsw-bin
+          BIN=$(find /tmp/ipsw-bin -type f -name ipsw | head -1)
+          [ -n "$BIN" ] || { echo "no ipsw binary in the archive"; find /tmp/ipsw-bin | head; exit 1; }
+          sudo install -m 0755 "$BIN" /usr/local/bin/ipsw
+          command -v ipsw && (ipsw version 2>/dev/null | head -1 || ipsw --version | head -1)
 
       - name: Fetch the encrypted root and cryptex dmgs
         run: |
