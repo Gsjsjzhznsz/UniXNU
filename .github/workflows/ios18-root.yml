@@ -88,7 +88,9 @@ jobs:
           set -euo pipefail
           JOBS="${{ inputs.jobs }}"
           [ -n "$JOBS" ] || JOBS="$(nproc)"
-          bash tools/renegade/renegade root --delete-sources --size "${{ inputs.size }}" --jobs "$JOBS" 2>&1 | tail -80
+          # Linux builds the image through a loop device and mount(8): run as root.
+          sudo -E bash tools/renegade/renegade root --delete-sources --size "${{ inputs.size }}" --jobs "$JOBS" 2>&1 | tail -80
+          sudo chown -R "$USER" research
           find research -maxdepth 3 -name '*.img' -o -maxdepth 3 -name '*.simg' | while read -r f; do
             ls -l "$f"; sha256sum "$f"
           done
