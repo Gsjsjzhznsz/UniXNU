@@ -62,7 +62,15 @@ jobs:
           mkdir -p inputs/raphael
           curl -sL -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ inputs.kernel_run_id }}/artifacts" -o /tmp/arts.json
-          ID=$(python3 -c "import json;print([a['id'] for a in json.load(open('/tmp/arts.json'))['artifacts'] if a['name']=='raphael-kernel'][0])")
+          ID=$(python3 - <<'PY'
+          import json
+          names = ('raphael-kernel', 'xnu-kernel')
+          arts = json.load(open('/tmp/arts.json'))['artifacts']
+          for a in arts:
+            if a['name'] in names:
+              print(a['id']); break
+          PY
+          )
           curl -sL -H "Authorization: Bearer $GH_TOKEN" \
             "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/$ID/zip" -o /tmp/k.zip
           python3 -c "import zipfile;zipfile.ZipFile('/tmp/k.zip').extractall('inputs/raphael')"
