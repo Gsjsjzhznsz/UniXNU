@@ -143,3 +143,35 @@ Checked on the phone 2026-11-06 (kernel run 42190048551, image T12):
 - Register dumps: `sysctl -w kern.sweet_spmi_addr=$(( (SID << 16) | 0xADDR ))`, then `sysctl kern.sweet_spmi_dump`.
 - Time zone without Settings (its Date & Time page hangs on this phone): as root
   `ln -sf /var/db/timezone/zoneinfo/Asia/Kuala_Lumpur /var/db/timezone/localtime`, then restart SpringBoard.
+
+## Real-hardware result: 2026-11-09 (Gsjsjzhznsz fork)
+
+Booted on the Redmi K20 Pro (raphael, 45c2b4ec) from a Renegade root built in CI:
+
+- kernel: `kernel.development.sweet` sha256 205ad0dcb2907d490242a311a2e59bc07d297d9781fa736e96f37233356e3d22
+  (CI run 42536678442, macos-15 + Xcode 16.2, xnu-11215.81.4 SWEET)
+- ADT: `raphael.adt` sha256 3f89931e8810bf588a0141d421431c9760342f61d564351affe46d246c6309ee
+  (`tools/mkadt.py --board raphael` with the D22AP base tree from Apple's public 16.7.16 IPSW)
+- boot image: `boot-raphael-ios18-rw.img` sha256 94ed68c3ed2eee4a13d182f683a8d6fe1e67810ad47e75849d4c96632f6ef2b5
+  (firmware-only base image 42538389077 + `mkboot-raphael.sh` with `RAPHAEL_RW=1`)
+- root: Renegade `ios18` (18.7.8/22H352, iPhone11,8) built on ubuntu-24.04 in CI run 42624403683:
+  `root.simg.zst` sha256 cb29f6aa3d89840b67c201e02be046ac324c5c24502549866b512825beb0b4fb,
+  raw image 21,474,836,480 bytes (`HX` HFSX, lastMountedVersion `H+Lx`), streamed to `/dev/block/sda31`
+  at 37 MiB/s (553 s) from TWRP.
+- launch: `fastboot boot` (nothing written to boot/dtbo); USB gadget 1209:0001 enumerated ~35 s after
+  `Booting OKAY`.
+- kernel UDP log (port 5140 on the host, `sweetusb=2` link) shows the userland starting:
+  containermanagerd_system, securityd, CloudKeychainProxy, triald, passd, WirelessRadioManagerd,
+  financed, generativeexperiencesd, `SWEET EXEC: xpcproxy` ...
+- screen: iOS home screen; **touch works** (swipe and icon taps respond) — GT9886 through patch 0260.
+
+### Linux-side fixes needed for the Renegade path (committed in this fork)
+
+1. `tools/remotezip.py` was missing upstream; added (exact-match `=` support), the callers need it.
+2. Renegade's Linux image build must run as root (loop device + mount): `sudo -E`.
+3. The IPSW root has no `/bin/sh` (the ssh tweak that installs dash is macOS-only on the prebuilt
+   path): `mkroot-full.py` now copies the Procursus shell from `/var/jb` to `/bin/sh` before verify.
+4. The `ipsw` CLI is only shipped as a `.deb`/`.rpm`/`.apk`, not in the tar (that is `ipswd`).
+5. `research/` is a symlink to the big disk, so the pack step must use `find -L`.
+6. Downloading the 7.5 GB artifact over one Wi-Fi uplink kept failing: `ios18-root-mirror.yml`
+   republishes it as 1.9 GB release chunks (release CDN), each verified by SHA-256.
