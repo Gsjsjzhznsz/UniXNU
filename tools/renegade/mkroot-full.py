@@ -563,8 +563,40 @@ def stage_seal(a, img, rootmnt):
         sys.exit(rplat.fsck_tool() + ' reports errors')
 
 
+SH_CANDIDATES = ('var/jb/usr/bin/dash', 'var/jb/bin/dash', 'var/jb/usr/bin/bash', 'var/jb/bin/bash',
+                 'var/jb/usr/bin/sh', 'bin/bash', 'usr/bin/bash')
+
+
+def ensure_bin_sh(img, rootmnt):
+    """Give the root a /bin/sh.
+
+    The IPSW root has no shell: on macOS the ssh tweak installs the prebuilt dash as /bin/sh,
+    and that tweak is skipped on Linux (no prebuilt on-device binaries). The jailbreak stage
+    still installs the Procursus userland under /var/jb, which carries a shell, so expose that
+    one as /bin/sh. Returns the source path, or None when the image has no shell at all.
+    """
+    dev = attach(img, rootmnt, readonly=False, owners=True)
+    try:
+        sh = os.path.join(rootmnt, 'bin/sh')
+        if os.path.lexists(sh):
+            return 'bin/sh (present)'
+        for cand in SH_CANDIDATES:
+            src = os.path.join(rootmnt, cand)
+            if os.path.exists(src):
+                os.makedirs(os.path.join(rootmnt, 'bin'), exist_ok=True)
+                shutil.copy2(src, sh)
+                os.chown(sh, 0, 0)
+                os.chmod(sh, 0o755)
+                log(f'/bin/sh <- /{cand} (the IPSW root has no shell)')
+                return cand
+        return None
+    finally:
+        detach(dev)
+
+
 def stage_verify(a, img, rootmnt):
     import random
+    shell = ensure_bin_sh(img, rootmnt)
     dev = attach(img, rootmnt, readonly=True, owners=True)
     ok = True
     try:
@@ -577,6 +609,9 @@ def stage_verify(a, img, rootmnt):
                   'usr/libexec/xpcproxy', 'System/Library/xpc/launchd.plist', 'Library/Wallpaper/Collections',
                   'System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e', 'bin/sh',
                   'System/Library/CoreServices/SystemVersion.plist'):
+            if p == 'bin/sh' and shell is None:
+                log('SKIP exists /bin/sh (no shell in the IPSW root and none under /var/jb)')
+                continue
             chk(os.path.exists(os.path.join(R, p)), 'exists /' + p)
         n = len(os.listdir(os.path.join(R, 'Library/Wallpaper/Collections')))
         chk(n > 0, f'Library/Wallpaper/Collections has {n} entries')
