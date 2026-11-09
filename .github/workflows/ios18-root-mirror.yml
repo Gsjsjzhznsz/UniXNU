@@ -1,0 +1,68 @@
+name: mirror root artifact as release chunks
+
+# The single Wi-Fi uplink of the target host drops on the 7.5 GB Actions
+# artifact blob. Re-publish that artifact as release assets: the download
+# happens inside GitHub (fast) and release assets are served by the release
+# CDN in 1.9 GB chunks that can be retried independently.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: run that holds the ios18-root artifact
+        required: true
+        default: "42624403683"
+      tag:
+        description: release tag to publish
+        required: false
+        default: ios18-root-22H352
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Download the artifact inside GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.run_id }}/artifacts" > work/arts.json
+          ID=$(python3 -c "import json;print([a['id'] for a in json.load(open('work/arts.json'))['artifacts'] if a['name']=='ios18-root'][0])")
+          echo "artifact $ID"
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ID/zip" > work/root.zip
+          ls -l work/root.zip
+          mkdir -p work/out
+          unzip -q -o work/root.zip -d work/out
+          ls -l work/out
+
+      - name: Split and hash
+        run: |
+          set -euo pipefail
+          cd work/out
+          src=$(find . -name '*.zst' | head -1)
+          echo "source: $src"
+          cp "$src" ../root.simg.zst
+          cd ..
+          split -b 1900m -d -a 2 root.simg.zst chunk-
+          ls -l chunk-*
+          sha256sum chunk-* root.simg.zst > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd work
+          TAG="${{ inputs.tag }}"
+          gh release delete "$TAG" --repo "${{ github.repository }}" -y 2>/dev/null || true
+          gh release create "$TAG" --repo "${{ github.repository }}" \
+            --title "iOS 18.7.8 root image (22H352, raphael)" \
+            --notes "Renegade-built HFS+ root for Redi K20 Pro. Chunks are 1900 MiB pieces of root.simg.zst (zstd Android sparse image); SHA256SUMS lists them and the whole file. Source artifact: run ${{ inputs.run_id }}."
+          gh release upload "$TAG" --repo "${{ github.repository }}" chunk-* SHA256SUMS
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[] | .name + " " + (.size|tostring)'
