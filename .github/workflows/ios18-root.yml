@@ -141,6 +141,28 @@ jobs:
           sudo umount "$MNT"
           sudo losetup -d "$DEV"
 
+      - name: Install Chlorophyll's bgmtl into the image
+        if: always()
+        run: |
+          set -euo pipefail
+          RAW=$(find -L research -name '*.img' -type f -size +10G | head -1)
+          [ -n "$RAW" ] || { echo "no raw root image"; exit 1; }
+          sudo mkdir -p /mnt/bgmtl
+          sudo modprobe hfsplus
+          DEV=$(sudo losetup --find --show "$RAW")
+          sudo mount -t hfsplus -o rw,force "$DEV" /mnt/bgmtl
+          sudo env RENEGADE_BGMTL_DIR="$PWD/tools/raphael/chlorophyll/prebuilt" python3 - <<'PY'
+          import importlib.util, os
+          here = os.path.abspath('tools/renegade')
+          spec = importlib.util.spec_from_file_location('root_tweaks18', os.path.join(here, 'root_tweaks18.py'))
+          rt = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(rt)
+          print('bgmtl ->', rt.bgmtl('/mnt/bgmtl'))
+          PY
+          sync
+          sudo umount /mnt/bgmtl
+          sudo losetup -d "$DEV"
+
       - name: Verify Chlorophyll, the ssh key and the GPU firmware in the image
         continue-on-error: true
         run: |
