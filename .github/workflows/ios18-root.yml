@@ -107,26 +107,8 @@ jobs:
             ls -l "$f"; sha256sum "$f"
           done
 
-      - name: Verify Chlorophyll and the ssh key in the image
-        run: |
-          set -uo pipefail
-          RAW=$(find -L research -name 'root.img' -type f | head -1)
-          [ -n "$RAW" ] || { echo "no root.img"; exit 1; }
-          sudo mkdir -p /mnt/check
-          if sudo mount -o loop,ro "$RAW" /mnt/check; then
-            echo "== /usr/local/lib/bgmtl"; ls -l /mnt/check/usr/local/lib/bgmtl || true
-            echo "== MercuryPosterExtension links"; M=/mnt/check/System/Library/ExtensionKit/Extensions/MercuryPosterExtension.appex/MercuryPosterExtension
-            [ -f "$M" ] && (strings -a "$M" | grep -o 'bgmtl[^ ]*' | sort -u | head -5) || echo "no MercuryPosterExtension"
-            echo "== authorized_keys"; cat /mnt/check/private/var/root/.ssh/authorized_keys || true
-            echo "== dropbear"; ls -l /mnt/check/usr/local/bin/dropbear /mnt/check/bin/sh || true
-            sudo umount /mnt/check
-          else
-            echo "could not mount the image for verification"
-          fi
-          exit 0
-
       - name: Inject the GPU firmware into the root
-        if: inputs.gpu_firmware_url != ''
+        if: always() && inputs.gpu_firmware_url != ''
         run: |
           set -euo pipefail
           sudo chown -R "$USER" /mnt/renegade-research
@@ -158,6 +140,24 @@ jobs:
           sync
           sudo umount "$MNT"
           sudo losetup -d "$DEV"
+
+      - name: Verify Chlorophyll, the ssh key and the GPU firmware in the image
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          RAW=$(find -L research -name 'root.img' -type f | head -1)
+          [ -n "$RAW" ] || { echo "no root.img"; exit 0; }
+          sudo mkdir -p /mnt/check
+          sudo modprobe hfsplus || true
+          DEV=$(sudo losetup --find --show "$RAW") || { echo "losetup failed"; exit 0; }
+          sudo mount -t hfsplus -o ro,force "$DEV" /mnt/check || { echo "mount failed"; sudo losetup -d "$DEV"; exit 0; }
+          echo "== /usr/local/lib/bgmtl"; ls -l /mnt/check/usr/local/lib/bgmtl || true
+          M=/mnt/check/System/Library/ExtensionKit/Extensions/MercuryPosterExtension.appex/MercuryPosterExtension
+          echo "== MercuryPosterExtension"; [ -f "$M" ] && (strings -a "$M" | grep -o 'bgmtl[^ ]*' | sort -u | head -5) || echo "absent"
+          echo "== authorized_keys"; cat /mnt/check/private/var/root/.ssh/authorized_keys 2>/dev/null || true
+          echo "== dropbear"; ls -l /mnt/check/usr/local/bin/dropbear /mnt/check/bin/sh 2>/dev/null || true
+          echo "== GPU firmware"; ls -l /mnt/check/usr/local/share/firmware/ 2>/dev/null || true
+          sudo umount /mnt/check; sudo losetup -d "$DEV"
 
       - name: Pack and upload the root image
         if: always()
