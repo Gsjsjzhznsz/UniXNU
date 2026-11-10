@@ -343,7 +343,15 @@ def toybox_applets(out):
         return open(lst).read().split()
     cfg = os.path.join(HERE, '..', 'ssh', 'toybox.config')
     binary = open(os.path.join(out, 'toybox'), 'rb').read()
-    cand = {m.lower() for m in re.findall(r'^CONFIG_([A-Z0-9_]+)=y', open(cfg).read(), re.M)}
+    if os.path.isfile(cfg):
+        cand = {m.lower() for m in re.findall(r'^CONFIG_([A-Z0-9_]+)=y', open(cfg).read(), re.M)}
+    else:
+        # This fork has no tools/ssh/toybox.config (it is built on a Mac in the upstream scratchpad). Without the
+        # description strings the derived list would be empty anyway, so fall back to the applets the Renegade
+        # scripts actually use; names absent from the binary are filtered out below.
+        cand = set('''cat chmod chown cp mv rm rmdir mkdir ln ls ps kill mount umount dd df du grep sed awk sort uniq wc
+head tail strings find xargs sleep usleep date sync tar gzip gunzip id whoami env true false echo test touch tr cut seq
+printf stat readlink basename dirname mktemp ping ifconfig route netstat nslookup wget netcat sh'''.split())
     found = {c for c in cand if b'\0' + c.encode() + b'\0' in binary} - {'toybox'}
     if 'test' in found:
         found.add('[')
