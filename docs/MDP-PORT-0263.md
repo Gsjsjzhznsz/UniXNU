@@ -84,3 +84,38 @@ Pass criteria for the goal: `mode` is no longer `copy`, `zc_frames` grows, `copy
 `UniXNU/UniXNU` is 786 commits ahead of the fork point (different history, merged by subtree:
 `uefi/`, `scripts/`, `patches/`, `board.toml` are the useful parts; our `xnu/patches-11215`
 series stays the reference for iOS 18). `jackyhowh/UniXNU-raphael` has 0 new commits.
+
+## Built images (2026-11-11 03:11, kernel run 42880069538)
+
+Kernel `kernel.development.sweet`, sha256 `366dff29298f9ff60b75594b55eb93d70518b903aed4d067d5876b99c00bf4ff`
+(19,005,040 bytes). Both patches are in it: the binary carries `MDP/DPU probe on raphael`,
+`SWEET SMMU: scan:` and `SWEET FB: pace win=`.
+
+Packed by `tools/raphael/pack-mdp-tests.sh` into `ios16-reference/ios18-image/`:
+
+| image | sha256 | args that matter |
+| --- | --- | --- |
+| `boot-ios18-mdp-base.img` | `f274671beb576b2e77c1a0cbf8774745a925dfac63e3a6090940ebb1c838b309` | control |
+| `boot-ios18-mdp-probe.img` | `ba27920ece0a9e7639b7878c14538d6eff23a3327719114a80c2c0b2e984a248` | `sweetfb_mdp=1 sweetfb_smmu=1 sweetfb_smmu_scan=1 sweetfb_statlog=1` |
+| `boot-ios18-mdp-hw.img` | `e871ae96e160b73734a00913c4869d7be133b8906df042e8825f0f9078146bde` | `+ sweetfb_hw=1` |
+| `boot-ios18-mdp-zc.img` | `ab8d847f06c4452e7b8396447e0d7596c24058aa41c1f06d39243f181faa227b` | `+ sweetfb_hw=1 sweetfb_zc=1` |
+
+Each carries the same kernel (verified byte-identical to the artifact) in the FAT of a copy of
+`boot-raphael-ios18-plog.img`; `boot`/`dtbo`/userdata are untouched, so `fastboot boot` is the
+whole procedure and booting any older image rolls back.
+
+### Reading the probe boot
+
+`SWEET MDP:` lines give, per pipe (VIG0..3, DMA0..3), the source address/stride/size/format and,
+for VIG pipes, the QSEED3 hardware version; the pipe whose source equals the boot framebuffer is
+the one ABL left scanning (and the one `fPipe` becomes). `SWEET MDP: INTF1 frame count a -> b`
+says whether the interface is actually scanning.
+
+`SWEET SMMU: scan:` lists every valid SMR with its S2CR: `id`/`mask` identify the stream, `type`
+BYPASS means the MDP's fetches are not translated (that is the condition `fZcOK` wants), TRANSLATE
+means the driver would have to program a context bank. If no SMR covers the MDP, give the ids as
+`sweetfb_sid_a/sid_b` and re-run with `sweetfb_smmu=1`.
+
+`SWEET FB: pace ...` (patch 0264) then shows per second whether frames are held by the GPU gate
+(`gpu_holds`, `hold_to`) and what a copy costs (`copy_us`), which is what decides whether the
+direct/zc path is worth chasing on this board.
