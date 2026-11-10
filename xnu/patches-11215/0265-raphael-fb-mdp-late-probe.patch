@@ -1,0 +1,103 @@
+raphael: print the MDP/DPU and SMMU probe again after the USB link is up
+
+The 0263 probe prints run in SweetFramebuffer::start() (about 2 s after the
+kernel enters BSD), before the CDC-ECM gadget exists: on a boot image the 64 KiB
+console ring that the USB log thread flushes has already wrapped, so a probe boot
+usually shows only "smmu=translate-or-unknown" in the stats line and none of the
+"SWEET MDP:"/"SWEET SMMU: scan:" output - the state that was asked for.
+
+This keeps sweetfb_mdp / sweetfb_mdp_pa / sweetfb_sid_a / sweetfb_sid_b /
+sweetfb_smmu_scan in globals and repeats them from statsTick() at the 3rd, 6th
+and 9th one-second window (about 3 s, 6 s and 9 s after the first vsync):
+
+  SWEET FB: mdp late 3/9 gMdp=1 pa=0xae00000 sid_a=0x880 sid_b=0xc80 scan=1 mode=copy
+  SWEET FB: mdp late sid 0x880 -> 2, 0xc80 -> 2 (1 bypass, 2 translate, ...)
+  SWEET MDP: ...            (mdpProbe() re-reads at the 3rd and 9th window)
+  SWEET SMMU: scan: ...     (sweetfb_smmu_dump_smr() at 3/6/9 when scan=1)
+
+Everything stays read-only: mdpProbe() now maps the window only once and the two
+SMMU helpers never write. sweetfb_hw/sweetfb_direct/sweetfb_zc are still what
+turns the fast paths on.
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -167,6 +167,10 @@
+  * Boot-arg sweetfb_native=1 presents the real panel size instead.
+  */
+ static bool gMdp;                /* MDP/DPU paths enabled for this board (sweetfb_mdp=1) */
++static uint32_t gMdpPa;          /* sweetfb_mdp_pa (0 = SWEET_MDP_PA default) */
++static uint32_t gSidA = 0x880, gSidB = 0xc80;   /* sweetfb_sid_a/sid_b */
++static int gSmmuScan;            /* sweetfb_smmu_scan=1 */
++static int gMdpLateTick;         /* stats windows counted for the delayed probe */
+ 
+ #define SWEET_FB_LOGICAL_W              1125
+ #define SWEET_FB_LOGICAL_H              2436
+@@ -609,6 +613,14 @@
+ 	if (gMdp && !sweet_board_beryllium()) {
+ 		IOLog("SWEET FB: sweetfb_mdp=1: MDP/DPU probe on raphael (read-only until sweetfb_hw/sweetfb_direct/sweetfb_zc are given)\n");
+ 	}
++	/*
++	 * Keep the board data for the delayed probe: these prints run before the USB console link
++	 * exists, so on a boot image the early values are normally lost.
++	 */
++	PE_parse_boot_argn("sweetfb_mdp_pa", &gMdpPa, sizeof(gMdpPa));
++	PE_parse_boot_argn("sweetfb_sid_a", &gSidA, sizeof(gSidA));
++	PE_parse_boot_argn("sweetfb_sid_b", &gSidB, sizeof(gSidB));
++	PE_parse_boot_argn("sweetfb_smmu_scan", &gSmmuScan, sizeof(gSmmuScan));
+ 	if (gMdp) {
+ 		PE_parse_boot_argn("sweetfb_hw", &hwReq, sizeof(hwReq));
+ 		PE_parse_boot_argn("sweetfb_direct", &directReq, sizeof(directReq));
+@@ -1172,7 +1184,29 @@
+ 	 */
+ 	if (winUS > 3000000) {
+ 		IOLog("SWEET FB: stats window %llu ms: vsync ticks stalled (mode=%s, copy path=%d)\n",
+-		    winUS / 1000, (fZc && fZcOK) ? (fDirect ? "direct" : "zc") : "copy", fZc ? 0 : 1);
++		    winUS / 1000, (fZc && fZcOK) ? (fDirect ? "direct" : "zc") : "copy", 	/*
++	 * Delayed read-only probe (0265): the MDP/DPU and SMMU state is printed again at the
++	 * 3rd, 6th and 9th stats window (about 3/6/9 s in), after the USB console link is up.
++	 * mdpProbe() only reads registers and is skipped when the window is already mapped;
++	 * sweet_smmu_probe_sid()/sweet_smmu_dump_smr() never write.
++	 */
++	if (gMdp && gMdpLateTick < 9) {
++		gMdpLateTick++;
++		if (gMdpLateTick == 3 || gMdpLateTick == 6 || gMdpLateTick == 9) {
++			IOLog("SWEET FB: mdp late %d/9 gMdp=%d pa=0x%x sid_a=0x%x sid_b=0x%x scan=%d mode=%s\n",
++				gMdpLateTick, gMdp, gMdpPa, gSidA, gSidB, gSmmuScan,
++				(fZc && fZcOK) ? (fDirect ? "direct" : "zc") : "copy");
++			IOLog("SWEET FB: mdp late sid 0x%x -> %d, 0x%x -> %d (1 bypass, 2 translate, 3 fault, 4 mixed, 0 none, -1 unreadable)\n",
++				gSidA, sweet_smmu_probe_sid(gSidA, 1), gSidB, sweet_smmu_probe_sid(gSidB, 1));
++			if (gSmmuScan) {
++				sweet_smmu_dump_smr();
++			}
++			if (gMdpLateTick == 3 || gMdpLateTick == 9) {
++				mdpProbe();
++			}
++		}
++	}
++fZc ? 0 : 1);
+ 	}
+ 	uint64_t swaps, coalesced;
+ 	IOLockLock(fLock);
+@@ -1466,15 +1500,16 @@
+ void
+ AppleCLCD::mdpProbe(void)
+ {
+-	uint32_t mdpPa = SWEET_MDP_PA;
+-	PE_parse_boot_argn("sweetfb_mdp_pa", &mdpPa, sizeof(mdpPa));
++	uint32_t mdpPa = gMdpPa ? gMdpPa : SWEET_MDP_PA;
+ 	if (mdpPa != SWEET_MDP_PA) {
+ 		IOLog("SWEET MDP: window overridden to 0x%x (default 0x%x)\n", mdpPa, SWEET_MDP_PA);
+ 	}
+-	fMdp = ml_io_map(mdpPa, SWEET_MDP_SIZE);
+ 	if (fMdp == 0) {
+-		IOLog("SWEET MDP: map failed\n");
+-		return;
++		fMdp = ml_io_map(mdpPa, SWEET_MDP_SIZE);
++		if (fMdp == 0) {
++			IOLog("SWEET MDP: map failed\n");
++			return;
++		}
+ 	}
+ 	for (uint32_t i = 0; i < sizeof(sweet_mdp_pipes) / sizeof(sweet_mdp_pipes[0]); i++) {
+ 		vm_offset_t p = fMdp + sweet_mdp_pipes[i].off;

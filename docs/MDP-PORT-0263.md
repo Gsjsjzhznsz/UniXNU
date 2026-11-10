@@ -119,3 +119,34 @@ means the driver would have to program a context bank. If no SMR covers the MDP,
 `SWEET FB: pace ...` (patch 0264) then shows per second whether frames are held by the GPU gate
 (`gpu_holds`, `hold_to`) and what a copy costs (`copy_us`), which is what decides whether the
 direct/zc path is worth chasing on this board.
+
+## 0265: the delayed probe (why the first probe boot showed nothing)
+
+The probe prints in 0263 are made from `SweetFramebuffer::start()`, which runs about two seconds after
+the kernel enters BSD - before the CDC-ECM gadget exists. The USB log thread flushes the last 64 KiB of
+the console ring, and by the time the link is up that ring has already wrapped, so a probe boot shows
+only `smmu=translate-or-unknown` in the stats line and none of the `SWEET MDP:` / `SWEET SMMU: scan:`
+output. That is a log-transport effect, not a probe failure.
+
+`0265-raphael-fb-mdp-late-probe.patch` caches `sweetfb_mdp`, `sweetfb_mdp_pa`, `sweetfb_sid_a`,
+`sweetfb_sid_b` and `sweetfb_smmu_scan` in globals and repeats the probe from `statsTick()` at the 3rd,
+6th and 9th one-second window (roughly 3 s, 6 s and 9 s after the first vsync):
+
+```
+SWEET FB: mdp late 3/9 gMdp=1 pa=0xae00000 sid_a=0x880 sid_b=0xc80 scan=1 mode=copy
+SWEET FB: mdp late sid 0x880 -> 2, 0xc80 -> 2 (1 bypass, 2 translate, 3 fault, 4 mixed, 0 none, -1 unreadable)
+SWEET MDP: ...            mdpProbe() re-reads (3rd and 9th window only; window mapped once)
+SWEET SMMU: scan: ...     sweet_smmu_dump_smr() when sweetfb_smmu_scan=1
+```
+
+Everything stays read-only; `sweetfb_hw` / `sweetfb_direct` / `sweetfb_zc` are still what enables the
+fast paths. `tools/raphael/pack-mdp-tests.sh` now also writes `boot-ios18-mdp-probe2.img` with this set.
+
+How to read a probe2 boot:
+
+| line | meaning | next step |
+| --- | --- | --- |
+| `mdp late ... pa=0xae00000` but no `SWEET MDP:` lines | the window does not map at that base | try `sweetfb_mdp_pa` from the DT (`mdss` node) |
+| `SWEET MDP: ctl/lm ...` with plausible values | DPU window is there, pipes readable | boot the `-hw` image |
+| `scan:` entries with a translating SMR whose id matches `mdss` iommus | that id is the MDP stream | set `sweetfb_sid_a/sid_b` and boot `-zc` |
+| all SMRs `type BYPASS` | apps_smmu is bypassed for the display | zero-copy should not need the SMMU probe; go `-zc` |
