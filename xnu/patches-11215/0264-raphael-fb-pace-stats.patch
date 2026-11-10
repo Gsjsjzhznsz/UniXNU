@@ -1,0 +1,30 @@
+raphael fb: one short IOLog pacing line per stats window
+
+kern.sweet_fb carries every counter, but the line is longer than one UDP datagram on the
+USB log link, so the tail (gpu_holds, swap_wait_us, latch_us, copy_us, zc_us) never arrives
+in the captured console log. Print the pacing numbers on their own short line once per
+window instead: frames held by the scan-out gate for the GPU fence (and how many hit the
+50 ms cap), the average SwapWait and latch wait, and the per-frame copy/zero-copy time.
+A high gpu_holds count is the compositor waiting for its own GPU work, which looks like a
+busy GPU with a low frame rate from the outside.
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -1186,6 +1225,16 @@
+ 	    fScanGpu && !fScanGpuOff ? (fScanGpuRest ? 2 : 1) : 0, c.scanGpuCopies, c.scanGpuFallbacks,
+ 	    c.scanGpuSubmitFails, c.scanGpuLate, sweet_abs_us(c.scanGpuWaitMaxAbs));
+ 	#undef PER_S
++	/*
++	 * Pacing line (patch 0264): one short IOLog line per stats window with the numbers that
++	 * decide how a frame reaches the panel. kern.sweet_fb has all of them, but the full line
++	 * does not fit a single UDP datagram on the USB log link and gets split. gpu_holds/hold_to
++	 * count frames the scan-out gate held for the GPU fence (50 ms cap): a high count is the
++	 * compositor waiting for its own GPU work, which is what a low frames-per-second with a
++	 * busy GPU looks like from the outside.
++	 */
++	IOLog("SWEET FB: pace win=%llums swaps=%llu copy=%llu zc=%llu gpu_holds=%llu hold_to=%llu swap_wait_us=%llu latch_us=%llu copy_us=%llu zc_us=%llu\n",
++	    winUS / 1000, dSwaps, dCopy, dZc, c.gpuHolds, c.gpuHoldTimeouts, swAvg, lwAvg, copyAvg, zcAvg);
+ 	sweet_fb_stats_publish(line);
+ 	if (fStLogSecs != 0 && (fStLogT == 0 || sweet_abs_us(now - fStLogT) >= (uint64_t)fStLogSecs * 1000000)) {
+ 		fStLogT = now;
