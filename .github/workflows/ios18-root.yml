@@ -87,6 +87,12 @@ jobs:
           bash tools/renegade/renegade fetch 2>&1 | tail -30
           du -sh research/* 2>/dev/null | head
 
+      - name: Fetch the prebuilt berga-tools (dropbear/dash/toybox, sweetnet tools)
+        run: |
+          set -euo pipefail
+          sudo -E bash tools/renegade/renegade fetch-tools 2>&1 | tail -20
+          sudo ls -l /root/.cache/bergamota/berga-tools/*/ssh 2>/dev/null | head -8 || true
+
       - name: Build the root image
         run: |
           set -euo pipefail
