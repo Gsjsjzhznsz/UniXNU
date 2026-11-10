@@ -1,0 +1,181 @@
+raphael: let the MDP/DPU fast paths run on this board (opt-in) and find its SMMU streams
+
+sweetfb_direct and sweetfb_hw/sweetfb_zc never engaged on raphael: the whole
+MDP block in SweetFramebuffer::start (mdpProbe, the hardware scaler, page
+flipping, the zero-copy/direct scanout setup and the MDP SMMU probe) sits behind
+sweet_board_beryllium(), so on SM8150 every boot ended in mode=copy and each
+frame went through the 10.9 MB CPU copy.
+
+Both boards share the MDSS window (DSI0 at 0x0ae94000 = 0x0ae00000 + 0x94000),
+so the block is now gated by gMdp = beryllium || (raphael && sweetfb_mdp=1).
+With sweetfb_mdp=1 alone it only probes: mdpProbe() and the SMMU stream probe
+are read-only, and sweetfb_hw/sweetfb_direct/sweetfb_zc still have to be given
+before anything is written (the DPU revision on SM8150 is unverified).
+
+raphael-specific data comes as boot args so it can be found from a boot image
+instead of a kernel rebuild:
+  sweetfb_mdp_pa=0x...   MDP window base (default 0x0ae00000)
+  sweetfb_sid_a/sid_b    MDP apps_smmu stream ids (default 0x880/0xc80, sdm845)
+  sweetfb_smmu_scan=1    dump every valid SMR/S2CR (new read-only
+                         sweet_smmu_dump_smr() in bsd/dev/sweet_smmu.c) so the
+                         real MDP stream ids can be read off the phone
+
+Also log stats windows longer than 3 s ("vsync ticks stalled"): win_ms=8901 was
+seen on a boot in mode=copy and is the stall the user feels, not a low frame rate.
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -47,6 +47,7 @@
+ #include "../../../bsd/dev/sweet_board.h"
+ #include "../../../bsd/dev/sweet_spmi.h"
+ extern "C" int sweet_smmu_probe_sid(unsigned sid, unsigned level); /* bsd/dev/sweet_smmu.c, read only */
++extern "C" void sweet_smmu_dump_smr(void);                 /* bsd/dev/sweet_smmu.c, read only */
+ extern "C" void sweet_fb_stats_publish(const char *text);       /* bsd/dev/sweet_fb.c: sysctl kern.sweet_fb */
+ extern "C" int sweet_fb_hud;
+ extern "C" uint32_t sweet_gpu_fence_snapshot(void);     /* bsd/dev/sweet_a630.c (0229) */
+@@ -165,6 +166,8 @@
+  * centered 1080x2400 part of it is shown on the 1080x2400 panel.
+  * Boot-arg sweetfb_native=1 presents the real panel size instead.
+  */
++static bool gMdp;                /* MDP/DPU paths enabled for this board (sweetfb_mdp=1) */
++
+ #define SWEET_FB_LOGICAL_W              1125
+ #define SWEET_FB_LOGICAL_H              2436
+ #include <pexpert/device_tree.h>
+@@ -591,7 +594,22 @@
+ 	}
+ 	int hwReq = 0;
+ 	int directReq = 0;
+-	if (sweet_board_beryllium()) {
++	/*
++	 * The MDP/DPU fast paths (hardware scaler, page flipping, zero-copy and
++	 * direct scanout) were written and verified on beryllium (SDM845). raphael
++	 * (SM8150) shares the MDSS window (DSI0 at 0x0ae94000) but its DPU revision
++	 * and its apps_smmu stream ids were never verified, so the block stays off
++	 * unless sweetfb_mdp=1 asks for it: with that alone it only probes (reads
++	 * CTL/LM/SSPP and the two SMMU streams), and sweetfb_hw/sweetfb_direct/
++	 * sweetfb_zc still have to be given separately before anything is written.
++	 */
++	int mdpReq = 0;
++	PE_parse_boot_argn("sweetfb_mdp", &mdpReq, sizeof(mdpReq));
++	gMdp = sweet_board_beryllium() || (sweet_board_raphael() && mdpReq != 0);
++	if (gMdp && !sweet_board_beryllium()) {
++		IOLog("SWEET FB: sweetfb_mdp=1: MDP/DPU probe on raphael (read-only until sweetfb_hw/sweetfb_direct/sweetfb_zc are given)\n");
++	}
++	if (gMdp) {
+ 		PE_parse_boot_argn("sweetfb_hw", &hwReq, sizeof(hwReq));
+ 		PE_parse_boot_argn("sweetfb_direct", &directReq, sizeof(directReq));
+ 		if (directReq) {
+@@ -659,7 +677,7 @@
+ 			IOLog("SWEET FB: sweetfb_hud=%d: performance HUD %s (sysctl kern.sweet_fb_hud)\n", hud, hud ? "on" : "off");
+ 		}
+ 	}
+-	if (sweet_board_beryllium()) {
++	if (gMdp) {
+ 		mdpProbe();
+ 		int flip = 0;
+ 		PE_parse_boot_argn("sweetfb_flip", &flip, sizeof(flip));
+@@ -696,9 +714,21 @@
+ 			smmuLevel = 1;
+ 		}
+ 		if (smmuLevel > 0) {
+-			/* read only: the MDP's streams (sdm845.dtsi mdss iommus 0x880 / 0xc80, mask 8) */
+-			int a = sweet_smmu_probe_sid(0x880, (unsigned)smmuLevel);
+-			int b = sweet_smmu_probe_sid(0xc80, (unsigned)smmuLevel);
++			/*
++			 * read only: the MDP's streams. sdm845.dtsi mdss iommus 0x880 / 0xc80 mask 8
++			 * (beryllium); raphael's apps_smmu ids are not known, so they can be given as
++			 * sweetfb_sid_a/sweetfb_sid_b (sweetfb_smmu_scan=1 dumps every valid SMR first).
++			 */
++			uint32_t sidA = 0x880, sidB = 0xc80;
++			PE_parse_boot_argn("sweetfb_sid_a", &sidA, sizeof(sidA));
++			PE_parse_boot_argn("sweetfb_sid_b", &sidB, sizeof(sidB));
++			int scan = 0;
++			PE_parse_boot_argn("sweetfb_smmu_scan", &scan, sizeof(scan));
++			if (scan) {
++				sweet_smmu_dump_smr();
++			}
++			int a = sweet_smmu_probe_sid(sidA, (unsigned)smmuLevel);
++			int b = sweet_smmu_probe_sid(sidB, (unsigned)smmuLevel);
+ 			fZcOK = a == 1 && b == 1;
+ 			fSmmuA = a;
+ 			fSmmuB = b;
+@@ -1135,6 +1165,15 @@
+ 	if (winUS < 1000000) {
+ 		return;
+ 	}
++	/*
++	 * statsTick runs from the vsync tick, so a window much longer than a second means the
++	 * display path stopped ticking for that long (a stall the user feels directly). Make
++	 * those visible in the console log instead of only in kern.sweet_fb (win_ms).
++	 */
++	if (winUS > 3000000) {
++		IOLog("SWEET FB: stats window %llu ms: vsync ticks stalled (mode=%s, copy path=%d)\n",
++		    winUS / 1000, (fZc && fZcOK) ? (fDirect ? "direct" : "zc") : "copy", fZc ? 0 : 1);
++	}
+ 	uint64_t swaps, coalesced;
+ 	IOLockLock(fLock);
+ 	swaps = fSt.swaps;
+@@ -1427,7 +1466,12 @@
+ void
+ AppleCLCD::mdpProbe(void)
+ {
+-	fMdp = ml_io_map(SWEET_MDP_PA, SWEET_MDP_SIZE);
++	uint32_t mdpPa = SWEET_MDP_PA;
++	PE_parse_boot_argn("sweetfb_mdp_pa", &mdpPa, sizeof(mdpPa));
++	if (mdpPa != SWEET_MDP_PA) {
++		IOLog("SWEET MDP: window overridden to 0x%x (default 0x%x)\n", mdpPa, SWEET_MDP_PA);
++	}
++	fMdp = ml_io_map(mdpPa, SWEET_MDP_SIZE);
+ 	if (fMdp == 0) {
+ 		IOLog("SWEET MDP: map failed\n");
+ 		return;
+diff --git a/bsd/dev/sweet_smmu.c b/bsd/dev/sweet_smmu.c
+--- a/bsd/dev/sweet_smmu.c
++++ b/bsd/dev/sweet_smmu.c
+@@ -240,6 +240,44 @@
+ }
+ 
+ /*
++ * READ ONLY diagnostic (boot-arg sweetfb_smmu_scan=1): dump every valid stream
++ * match register with the S2CR it selects. On a board whose MDP stream ids are
++ * not documented (raphael/SM8150) this shows which ids exist and whether they
++ * are bypass, translate or fault, so sweetfb_sid_a/sweetfb_sid_b can be set
++ * without guessing. Nothing is written and no bank is created.
++ */
++void
++sweet_smmu_dump_smr(void)
++{
++	if (__atomic_exchange_n(&smmu_lock, 1, __ATOMIC_ACQUIRE)) {
++		return;
++	}
++	if (smmu_base == 0) {
++		smmu_base = ml_io_map(SMMU_PA, SMMU_SIZE);
++	}
++	if (smmu_base == 0) {
++		printf("SWEET SMMU: scan: map failed\n");
++		goto out;
++	}
++	uint32_t id0 = smmu_rd(0x20), id1 = smmu_rd(0x24);
++	unsigned nsmr = id0 & 0xff;
++	printf("SWEET SMMU: scan: sCR0 0x%x ID0 0x%x ID1 0x%x, %u SMRs\n", smmu_rd(0x0), id0, id1, nsmr);
++	for (unsigned i = 0; i < nsmr && i < 128; i++) {
++		uint32_t smr = smmu_rd(0x800 + 4 * i);
++		if (!(smr & (1u << 31))) {
++			continue;
++		}
++		uint32_t s2cr = smmu_rd(0xc00 + 4 * i);
++		unsigned type = (s2cr >> 16) & 3;
++		printf("SWEET SMMU: scan: smr %u 0x%x id 0x%x mask 0x%x s2cr 0x%x type %s cb %u\n",
++		    i, smr, smr & 0x7fff, (smr >> 16) & 0x7fff, s2cr,
++		    type == 0 ? "TRANSLATE" : (type == 1 ? "BYPASS" : "FAULT"), s2cr & 0xff);
++	}
++out:
++	__atomic_store_n(&smmu_lock, 0, __ATOMIC_RELEASE);
++}
++
++/*
+  * READ ONLY. What does apps_smmu do with stream id sid right now? Logs every
+  * stream match register that matches it (SMR under its mask), the S2CR it
+  * selects and, for a translating one, the context bank's CBAR/CBA2R
