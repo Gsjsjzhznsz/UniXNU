@@ -48,12 +48,11 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp
  	if (gMdp) {
  		PE_parse_boot_argn("sweetfb_hw", &hwReq, sizeof(hwReq));
  		PE_parse_boot_argn("sweetfb_direct", &directReq, sizeof(directReq));
-@@ -1172,7 +1184,29 @@
- 	 */
- 	if (winUS > 3000000) {
+@@ -1174,6 +1186,28 @@
  		IOLog("SWEET FB: stats window %llu ms: vsync ticks stalled (mode=%s, copy path=%d)\n",
--		    winUS / 1000, (fZc && fZcOK) ? (fDirect ? "direct" : "zc") : "copy", fZc ? 0 : 1);
-+		    winUS / 1000, (fZc && fZcOK) ? (fDirect ? "direct" : "zc") : "copy", 	/*
+ 		    winUS / 1000, (fZc && fZcOK) ? (fDirect ? "direct" : "zc") : "copy", fZc ? 0 : 1);
+ 	}
++	/*
 +	 * Delayed read-only probe (0265): the MDP/DPU and SMMU state is printed again at the
 +	 * 3rd, 6th and 9th stats window (about 3/6/9 s in), after the USB console link is up.
 +	 * mdpProbe() only reads registers and is skipped when the window is already mapped;
@@ -75,10 +74,9 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +			}
 +		}
 +	}
-+fZc ? 0 : 1);
- 	}
  	uint64_t swaps, coalesced;
  	IOLockLock(fLock);
+ 	swaps = fSt.swaps;
 @@ -1466,15 +1500,16 @@
  void
  AppleCLCD::mdpProbe(void)
