@@ -150,3 +150,32 @@ How to read a probe2 boot:
 | `SWEET MDP: ctl/lm ...` with plausible values | DPU window is there, pipes readable | boot the `-hw` image |
 | `scan:` entries with a translating SMR whose id matches `mdss` iommus | that id is the MDP stream | set `sweetfb_sid_a/sid_b` and boot `-zc` |
 | all SMRs `type BYPASS` | apps_smmu is bypassed for the display | zero-copy should not need the SMMU probe; go `-zc` |
+
+## Built images for the 0265 probe (2026-11-11)
+
+Kernel: run `42925435728`, `kernel.development.sweet` sha256
+`02ea0b86c073ac2cc10cce8dbd90b3fe8d658d834ae2056a8a7be65b11951273` (19,005,0xx B; contains
+`SWEET FB: mdp late %d/9 gMdp=%d pa=0x%x ...`).
+
+| image (`ios16-reference/ios18-image/`) | sha256 |
+| --- | --- |
+| `boot-ios18-mdp-base.img` | `daecc76e06effdc3a55e1adcd80c4b29dbc36df5b89b2fb21b7829714fb2cc9a` |
+| `boot-ios18-mdp-probe2.img` | `edf8e04ebf2965a6a57414c9834b7670b0252f59d6a7bb2dda84a210a74bda4a` |
+| `boot-ios18-mdp-hw.img` | `a3e4cb5fcf75bdcf773298297749a18482fda6eaaae8a56a7a544a52461df2ef` |
+| `boot-ios18-mdp-zc.img` | `eb0e4ce882b4e49e1a4e6c69a0763861b5b3884416676f69f6c34575fe095962` |
+
+`probe2` arguments: `... sweetfb_statlog=1 sweetfb_mdp=1 sweetfb_smmu=1 sweetfb_smmu_scan=1`.
+
+What to read in its log (all read-only):
+
+1. `SWEET FB: mdp late 3/9 gMdp=1 pa=0xae00000 sid_a=0x880 sid_b=0xc80 scan=1 mode=copy`
+   - `gMdp=0` means `sweet_board_raphael()` did not answer at start(): stop here.
+2. `SWEET MDP: <pipe> src0 ... stride ...` and `SWEET MDP: ctl/lm ...`
+   - no such lines + `SWEET MDP: map failed` -> wrong window, find `mdss` in the DT and pass `sweetfb_mdp_pa`.
+3. `SWEET SMMU: scan: smr N ... type TRANSLATE|BYPASS|FAULT`
+   - the SMR whose id matches the MDP stream (0x880/0xc80 on sdm845) tells you which ids to pass as
+     `sweetfb_sid_a/sid_b`; all BYPASS means zero-copy does not have to go through the SMMU probe.
+4. `SWEET FB: mdp late sid 0x880 -> n` afterwards confirms the probe with the chosen ids.
+
+Then `boot-ios18-mdp-hw.img` (hardware scaler + page flip) and `boot-ios18-mdp-zc.img` (zero-copy);
+roll back by booting `boot-raphael-ios18-plog.img`. No partition is written by any of these.
