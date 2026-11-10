@@ -92,12 +92,38 @@ jobs:
           set -euo pipefail
           JOBS="${{ inputs.jobs }}"
           [ -n "$JOBS" ] || JOBS="$(nproc)"
+          # Chlorophyll's prebuilt bgmtl dylibs (Bergamota release bgmtl-20261025): Renegade's bgmtl() installs them
+          # into /usr/local/lib/bgmtl and links the Metal device into MercuryPosterExtension, so the wallpaper renders
+          # on the Adreno 640 instead of the CPU.
+          export RENEGADE_BGMTL_DIR="$PWD/tools/raphael/chlorophyll/prebuilt"
+          ls -l "$RENEGADE_BGMTL_DIR"
+          # Dropbear key for this project (the public half only): the root image gets it in /var/root/.ssh/authorized_keys.
+          mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+          install -m 644 tools/raphael/chlorophyll/prebuilt/id_ed25519.pub "$HOME/.ssh/id_ed25519.pub"
           # Linux builds the image through a loop device and mount(8): run as root.
-          sudo -E bash tools/renegade/renegade root --delete-sources --size "${{ inputs.size }}" --jobs "$JOBS" 2>&1 | tail -80
+          sudo -E env RENEGADE_BGMTL_DIR="$RENEGADE_BGMTL_DIR" bash tools/renegade/renegade root --delete-sources --size "${{ inputs.size }}" --jobs "$JOBS" 2>&1 | tail -80
           sudo chown -R "$USER" research
           find -L research -maxdepth 4 -name '*.img' -o -maxdepth 3 -name '*.simg' | while read -r f; do
             ls -l "$f"; sha256sum "$f"
           done
+
+      - name: Verify Chlorophyll and the ssh key in the image
+        run: |
+          set -uo pipefail
+          RAW=$(find -L research -name 'root.img' -type f | head -1)
+          [ -n "$RAW" ] || { echo "no root.img"; exit 1; }
+          sudo mkdir -p /mnt/check
+          if sudo mount -o loop,ro "$RAW" /mnt/check; then
+            echo "== /usr/local/lib/bgmtl"; ls -l /mnt/check/usr/local/lib/bgmtl || true
+            echo "== MercuryPosterExtension links"; M=/mnt/check/System/Library/ExtensionKit/Extensions/MercuryPosterExtension.appex/MercuryPosterExtension
+            [ -f "$M" ] && (strings -a "$M" | grep -o 'bgmtl[^ ]*' | sort -u | head -5) || echo "no MercuryPosterExtension"
+            echo "== authorized_keys"; cat /mnt/check/private/var/root/.ssh/authorized_keys || true
+            echo "== dropbear"; ls -l /mnt/check/usr/local/bin/dropbear /mnt/check/bin/sh || true
+            sudo umount /mnt/check
+          else
+            echo "could not mount the image for verification"
+          fi
+          exit 0
 
       - name: Inject the GPU firmware into the root
         if: inputs.gpu_firmware_url != ''
