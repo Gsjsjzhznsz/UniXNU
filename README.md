@@ -1,3 +1,34 @@
+# UniXNU / iOS 18 on the Redmi K20 Pro (raphael, SM8150)
+
+[![iOS 18.7.8](https://img.shields.io/badge/iOS-18.7.8%20(22H352)-blue)](#status)
+[![kernel](https://img.shields.io/badge/kernel-xnu--11215.81.4%20Heartwood-green)](#status)
+[![GPU](https://img.shields.io/badge/GPU-Adreno%20640%20%2B%20Chlorophyll%2FMesa-orange)](#status)
+
+**Fork of [jackyhowh/UniXNU-raphael](https://github.com/jackyhowh/UniXNU-raphael): the iOS 18.7.8 (Heartwood
+xnu-11215.81.4) port for the Redmi K20 Pro / Mi 9T Pro, with the Chlorophyll (Mesa freedreno) GPU compositor
+staged into the root image by CI.**
+
+Verified on a real Redmi K20 Pro (`raphael`, SM8150, Adreno 640, 8 CPUs):
+
+| Milestone | Evidence |
+| --- | --- |
+| iOS 18.7.8 boots to the home screen, touch works | GT9886 (patch 0260) |
+| Adreno 640 kernel driver | `sweetgpu=8`: GMU firmware booted (`FW_INIT_RESULT 0xbabeface`), HFI v2 ACKs, zap authenticated, CP NOP/fill tests pass, `SweetAdreno630` published |
+| GPU compositing of the whole UI | `backboardd` links `bgmtl-env.dylib` + `bgmtl-inject.dylib`; `bgmtl-env: BGMTL_BB=1 (Metal)`; `Chlorophyll device registered`; `sweet_fb swaps_s 37` and `kern.sweet_gpu submitted/completed 38513/38513, recoveries 0` |
+| iOS 18 wallpaper on the GPU | `MercuryPosterExtension` + `sweetposterset com.apple.MercuryPoster fluidity.two` |
+| SSH + kernel log over USB | dropbear with this fork's key, kernel log on UDP 5140 |
+
+CI (`.github/workflows/`): `xnu.yml` builds the kernel, `firmware-only.yml` packs the boot image, `ios18-root.yml`
+builds the Renegade iOS 18 root **and** stages the GPU firmware, Chlorophyll/dylibs, the backboardd compositor and
+the dropbear key into it, `ios18-root-mirror.yml` publishes the 20 GiB image as 1.9 GiB release chunks.
+Bring-up notes and the boot-argument sets that work: **[docs/IOS18.md](docs/IOS18.md)**.
+
+Known gaps in this fork at the moment: the boot-time crash storm (cryptexd `libimage4` panic → `ReportCrash` +
+`osanalyticshelper` pegging two cores) is mitgated with `SWEET_QUIET=1`; the display path is still `mode=copy`
+(per-frame CPU copy, `sweetfb_direct`/`sweetfb_hw+sweetfb_zc` are being measured).
+
+---
+
 # UniXNU-raphael: iOS on the Redmi K20 Pro / Mi 9T Pro (`raphael`)
 
 Apple's XNU and iOS on the Redmi K20 Pro / Mi 9T Pro (`raphael`, Snapdragon 855 / SM8150, Adreno 640). This fork
