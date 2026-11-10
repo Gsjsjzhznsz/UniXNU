@@ -120,7 +120,11 @@ jobs:
           mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
           install -m 644 tools/raphael/chlorophyll/prebuilt/id_ed25519.pub "$HOME/.ssh/id_ed25519.pub"
           # Linux builds the image through a loop device and mount(8): run as root.
-          sudo -E env RENEGADE_BGMTL_DIR="$RENEGADE_BGMTL_DIR" bash tools/renegade/renegade root --delete-sources --size "${{ inputs.size }}" --jobs "$JOBS" 2>&1 | tail -80
+          # SWEET_QUIET=1: Renegade quiet() drops the crash-looping cryptexd job (libimage4 panics
+          # "failed to get manifest properties" without ADT /chosen/manifest-properties) and throttles
+          # the daemons that respawn every few seconds (mobileactivationd, fairplayd.H2, ...). Without
+          # it ReportCrash + osanalyticshelper burn two cores on this image.
+          sudo -E env SWEET_QUIET=1 RENEGADE_BGMTL_DIR="$RENEGADE_BGMTL_DIR" bash tools/renegade/renegade root --delete-sources --size "${{ inputs.size }}" --jobs "$JOBS" 2>&1 | tail -80
           sudo chown -R "$USER" research
           find -L research -maxdepth 4 -name '*.img' -o -maxdepth 3 -name '*.simg' | while read -r f; do
             ls -l "$f"; sha256sum "$f"
