@@ -93,6 +93,19 @@ jobs:
           sudo -E bash tools/renegade/renegade fetch-tools 2>&1 | tail -20
           sudo ls -l /root/.cache/bergamota/berga-tools/*/ssh 2>/dev/null | head -8 || true
 
+      - name: Build bgmtl-env.dylib (the backboardd Metal gate)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq clang-18 lld-18 llvm-18
+          ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          for b in ld64.lld-18 ld64.lld; do [ -e /usr/bin/$b ] && { real=$b; break; }; done
+          ln -sf /usr/bin/${real:-ld64.lld} /usr/local/bin/ld64.lld-18
+          ln -sf /usr/bin/llvm-nm-18 /usr/local/bin/llvm-nm-18
+          ln -sf /usr/bin/llvm-objdump-18 /usr/local/bin/llvm-objdump-18
+          export PATH=/usr/local/bin:$PATH
+          cd tools/raphael/bgmtl-env && bash build.sh
+          ls -l bgmtl-env.dylib
+
       - name: Build the root image
         run: |
           set -euo pipefail
@@ -169,12 +182,30 @@ jobs:
           sudo umount /mnt/bgmtl
           sudo losetup -d "$DEV"
 
+      - name: Stage Chlorophyll as the system compositor (backboardd)
+        if: always()
+        run: |
+          set -euo pipefail
+          RAW=$(find -L research -name '*.img' -type f -size +10G | head -1)
+          [ -n "$RAW" ] || { echo "no raw root image"; exit 1; }
+          ENV=$PWD/tools/raphael/bgmtl-env/bgmtl-env.dylib
+          [ -f "$ENV" ] || { echo "bgmtl-env.dylib not built"; exit 1; }
+          sudo mkdir -p /mnt/comp
+          sudo modprobe hfsplus
+          DEV=$(sudo losetup --find --show "$RAW")
+          sudo mount -t hfsplus -o rw,force "$DEV" /mnt/comp
+          sudo env RENEGADE_BGMTL_DIR="$PWD/tools/raphael/chlorophyll/prebuilt" python3 \
+            tools/raphael/chlorophyll/stage_compositor.py /mnt/comp "$ENV"
+          sync
+          sudo umount /mnt/comp
+          sudo losetup -d "$DEV"
+
       - name: Verify Chlorophyll, the ssh key and the GPU firmware in the image
         continue-on-error: true
         run: |
           set -uo pipefail
-          RAW=$(find -L research -name 'root.img' -type f | head -1)
-          [ -n "$RAW" ] || { echo "no root.img"; exit 0; }
+          RAW=$(find -L research -name '*.img' -type f -size +10G | head -1)
+          [ -n "$RAW" ] || { echo "no raw image"; exit 0; }
           sudo mkdir -p /mnt/check
           sudo modprobe hfsplus || true
           DEV=$(sudo losetup --find --show "$RAW") || { echo "losetup failed"; exit 0; }
@@ -182,6 +213,8 @@ jobs:
           echo "== /usr/local/lib/bgmtl"; ls -l /mnt/check/usr/local/lib/bgmtl || true
           M=/mnt/check/System/Library/ExtensionKit/Extensions/MercuryPosterExtension.appex/MercuryPosterExtension
           echo "== MercuryPosterExtension"; [ -f "$M" ] && (strings -a "$M" | grep -o 'bgmtl[^ ]*' | sort -u | head -5) || echo "absent"
+          echo "== backboardd"; strings -a /mnt/check/usr/libexec/backboardd | grep -o 'bgmtl[^ ]*' | sort -u | head -5 || true
+          echo "== bb arm/off"; ls -l /mnt/check/private/var/tmp/bgmtl-bb.* /mnt/check/private/var/tmp/bgmtl.defer 2>/dev/null || true
           echo "== authorized_keys"; cat /mnt/check/private/var/root/.ssh/authorized_keys 2>/dev/null || true
           echo "== dropbear"; ls -l /mnt/check/usr/local/bin/dropbear /mnt/check/bin/sh 2>/dev/null || true
           echo "== GPU firmware"; ls -l /mnt/check/usr/local/share/firmware/ 2>/dev/null || true
