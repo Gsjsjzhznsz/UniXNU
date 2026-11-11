@@ -1,0 +1,284 @@
+sweet: the display reads iOS frames itself (full GPU scanout, no CPU copy)
+
+Every frame backboardd swaps was copied by the CPU into the ABL's panel
+memory (0x9c000000): 1125x2436 scaled to 1080x2340, ~11 MB read and ~10 MB
+written per frame, the last CPU work left in the display path. Here the pipe
+is pointed at the CoreAnimation IOSurface itself at every swap and VIG0's
+QSEED3 scaler does the fit: the GPU renders, the display scans, the CPU
+copies nothing.
+
+This is the same SoC (SM8150), the same DPU 5.0, the same 1080x2340 panel and
+1125x2436 canvas as the proven UniXNU-andromeda port (patch 0207 of
+giannoccarol/UniXNU-andromeda, itself from ShueiTsuki's data-a-live 0217):
+sweet_scanout.c (staged by 0268-stage-sweet-scanout.sh) installs the display
+stream's own stage-1 tables in apps_smmu bank 2 (SID 0x800, SMR 3, the state
+the 0263/0265 probe found on raphael: TRANSLATE, not BYPASS, so the old
+sweetfb_zc refusal does not apply), maps the 36 MiB splash carve-out at its
+own address so the copy fallback and the console still work, and puts
+surfaces in 8 x 16 MiB IOVA slots from 0x80000000. The tables themselves live
+in the carve-out's tail because every byte xnu manages is above 4 GiB and the
+SMMU's 32-bit output size could not reach a kernel allocation.
+
+Boot args: sweetfb_mdp=1 sweetfb_scanout=1 (plus sweetfb_scale=2 for the
+1125->1080 stretch). Without sweetfb_scanout=1 nothing changes. The hardware
+is set up at the first Metal frame and only if the pipe is exactly the ABL's
+setup; any mismatch, SMMU fault or untaken flush leaves the CPU copy for the
+boot (fail closed). A panic puts the pipe back on the panel memory.
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index ea5a65a..7d5a79e 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -117,6 +117,7 @@ bsd/dev/sweet_cpufreq.c			standard
+ bsd/dev/sweet_charger.c			standard
+ bsd/dev/sweet_smmu.c			standard
+ bsd/dev/sweet_fb.c			standard
++bsd/dev/sweet_scanout.c		standard
+ bsd/dev/sweet_a630.c			standard
+ bsd/dev/sweet_a630_pas.c			standard
+ bsd/dev/beryllium_wlan.c		standard
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 05bf11f..f2ad606 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -46,6 +46,8 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ extern "C" void sweet_busy_init(void);          /* iokit/Kernel/arm/SweetBusy.cpp (boot-arg sweetbusy=N) */
+ #include "../../../bsd/dev/sweet_board.h"
+ #include "../../../bsd/dev/sweet_spmi.h"
++/* bsd/dev/sweet_scanout.c (patch 0268): the display reads the frames itself, no CPU copy. */
++#include "sweet_scanout.h"
+ extern "C" int sweet_smmu_probe_sid(unsigned sid, unsigned level); /* bsd/dev/sweet_smmu.c, read only */
+ extern "C" void sweet_smmu_dump_smr(void);                 /* bsd/dev/sweet_smmu.c, read only */
+ extern "C" void sweet_fb_stats_publish(const char *text);       /* bsd/dev/sweet_fb.c: sysctl kern.sweet_fb */
+@@ -414,6 +416,23 @@ public:
+ 	uint8_t       fEarlyRec[SWEET_FB_SWAP_REC_SIZE];
+ 	void          quietConsole(void);
+ 	uint32_t      fZcCleanMode;     /* sweetfb_zcclean: 0 never, 1 always (0127 behaviour), 2 auto (patch 0212) */
++	/*
++	 * GPU scanout (patch 0268, boot-arg sweetfb_scanout=1): the display reads the lone full-canvas BGRA
++	 * surface itself (bsd/dev/sweet_scanout.c installs the display stream's stage-1 tables and points VIG0
++	 * at the surface's IOVA, QSEED3 scales canvas -> panel). fScanout: the mode asked for; fScanoutTried:
++	 * the hardware was set up once; fScanoutOn: it is set up. The holds reuse fZcHeld/fZcCount (released
++	 * by zcPoll once a later flush was taken). fScanoutMaps: surfaces kept mapped for the display (a frame
++	 * on screen and the one queued behind it, plus room); a mapping is only dropped when its surface is
++	 * not held and another one needs the slot.
++	 */
++#define SWEET_SCANOUT_MAPS 4
++	struct { SweetSurface *s; uint32_t iova, pages; uint64_t used; } fScanoutMaps[SWEET_SCANOUT_MAPS];
++	uint64_t      fScanoutClock;
++	bool          fScanout, fScanoutTried, fScanoutOn;
++	uint64_t      fScanoutFrames, fScanoutRefused;
++	uint32_t      scanoutIova(SweetSurface *s);
++	bool          scanoutPresent(SweetSurface *s, uint32_t id, int32_t sx, int32_t sy, int32_t dx, int32_t dy,
++	    int32_t w, int32_t h);
+ 	uint64_t      fStPrevT, fStLogT;
+ 	uint32_t      fStLogSecs;       /* sweetfb_statlog: seconds between IOLog lines, 0 = sysctl only */
+ 	int           fSmmuA, fSmmuB;   /* MDP SMMU probe results, -2 = not probed */
+@@ -771,6 +790,32 @@ AppleCLCD::start(IOService *provider)
+ 				}
+ 			}
+ 		}
++		/*
++		 * 0268: full GPU acceleration. sweetfb_scanout=1 arms the display to read the Metal frame's
++		 * surface itself through the display stream's own stage-1 tables (sweet_scanout.c): no CPU copy
++		 * of the 10.9 MB frame at all. It works with the SMMU in TRANSLATE (the ABL's state on raphael),
++		 * not bypass, and needs neither the low pool nor any surface to sit below 4 GiB. The hardware is
++		 * set up at the first Metal frame; until then (and on any refusal) frames are copied as before.
++		 * fEarly/fSwapSync gate the early present path, so they are turned on here, after the low-pool
++		 * block: the pool is simply not used in scanout mode.
++		 */
++		int scanoutReq = 0;
++		PE_parse_boot_argn("sweetfb_scanout", &scanoutReq, sizeof(scanoutReq));
++		if (scanoutReq) {
++			if (fScale == 0) {
++				IOLog("SWEET FB: sweetfb_scanout needs sweetfb_scale=1 (fit) or 2 (stretch); scanout off\n");
++			} else if (!gMdp) {
++				IOLog("SWEET FB: sweetfb_scanout needs sweetfb_mdp=1 on this board (the MDP window); scanout off\n");
++			} else {
++				fScanout = true;
++				fZc = true;             /* reuse the hold/poll machinery (fZcHeld, zcPoll) */
++				fZcOK = true;           /* fEarly/fSwapSync gate; the low pool is not used */
++				fDirect = true;
++				IOLog("SWEET FB: sweetfb_scanout=1: the display reads Metal frames itself through the display stream's "
++				    "stage-1 tables (%ux%u -> %ux%u, QSEED3), no CPU copy; the hardware is set up at the first Metal frame\n",
++				    fLogicalW, fLogicalH, fWidth, fHeight);
++			}
++		}
+ 		if (fZc && fZcOK) {
+ 			bool nosync = fZcCleanMode == 0 || fZcCleanMode == 2;
+ 			sweet_lowpool_gpu_nosync(nosync);
+@@ -2185,6 +2230,157 @@ AppleCLCD::zcReleaseAll(void)
+ 	fZcFront = false;
+ }
+ 
++/*
++ * 0268: the IOVA of S for the display (mapped on first use, kept while it is swapped), or 0. An entry is
++ * only evicted when its surface is neither held nor the one being swapped, so the pipe never reads a
++ * page that was given back. Present path only.
++ */
++uint32_t
++AppleCLCD::scanoutIova(SweetSurface *s)
++{
++	static uint64_t pages[(16u << 20) / 4096];
++	fScanoutClock++;
++	for (unsigned i = 0; i < SWEET_SCANOUT_MAPS; i++) {
++		if (fScanoutMaps[i].s == s) {
++			fScanoutMaps[i].used = fScanoutClock;
++			return fScanoutMaps[i].iova;
++		}
++	}
++	int slot = -1;
++	for (unsigned i = 0; i < SWEET_SCANOUT_MAPS; i++) {
++		if (fScanoutMaps[i].s == NULL) {
++			slot = (int)i;
++			break;
++		}
++		bool held = false;
++		for (uint32_t k = 0; k < fZcCount; k++) {
++			held = held || fZcHeld[k] == fScanoutMaps[i].s;
++		}
++		if (!held && (slot < 0 || fScanoutMaps[i].used < fScanoutMaps[slot].used)) {
++			slot = (int)i;
++		}
++	}
++	if (slot < 0) {
++		return 0;
++	}
++	if (fScanoutMaps[slot].s != NULL) {
++		sweet_scanout_unmap(fScanoutMaps[slot].iova, fScanoutMaps[slot].pages);
++		fScanoutMaps[slot].s->memory->complete();
++		fScanoutMaps[slot].s->release();
++		fScanoutMaps[slot].s = NULL;
++	}
++	const uint64_t len = s->memory->getLength();
++	if (len == 0 || len > (uint64_t)sizeof(pages)) {
++		return 0;
++	}
++	if (s->memory->prepare() != kIOReturnSuccess) {
++		return 0;
++	}
++	const uint32_t n = (uint32_t)((len + 4095) / 4096);
++	bool ok = true;
++	for (uint32_t i = 0; i < n && ok; i++) {
++		IOByteCount seg = 0;
++		const addr64_t pa = s->memory->getPhysicalSegment((IOByteCount)i * 4096, &seg, kIOMemoryMapperNone);
++		ok = pa != 0 && (pa & 0xfff) == 0;
++		pages[i] = pa;
++	}
++	const uint32_t iova = ok ? sweet_scanout_map(pages, n) : 0;
++	if (iova == 0) {
++		s->memory->complete();
++		return 0;
++	}
++	/* the prepare() stays outstanding while the mapping is in the cache; eviction completes it */
++	s->retain();
++	fScanoutMaps[slot].s = s;
++	fScanoutMaps[slot].iova = iova;
++	fScanoutMaps[slot].pages = n;
++	fScanoutMaps[slot].used = fScanoutClock;
++	IOLog("SWEET FB: scanout maps surface %u (%ux%u, %u pages) at iova %#x\n", s->id, s->width, s->height, n, iova);
++	return iova;
++}
++
++/*
++ * 0268: one frame the pipe takes as it is: one layer showing the whole canvas from a BGRA surface of
++ * exactly that size, display on. True when the pipe has it (the surface is held until a later flush);
++ * else the frame is copied as before.
++ */
++bool
++AppleCLCD::scanoutPresent(SweetSurface *s, uint32_t id, int32_t sx, int32_t sy, int32_t dx, int32_t dy,
++    int32_t w, int32_t h)
++{
++	if (s == NULL || s->memory == NULL) {
++		return zcDecline(20, "scanout: no surface memory", id);
++	}
++	if (!fScanoutOn) {
++		if (fScanoutTried) {
++			return zcDecline(21, "scanout: the display stream is not the ABL's panel setup (CPU copy)", id);
++		}
++		fScanoutTried = true;
++		if (sweet_scanout_init(fPhys, fRowBytes, fWidth, fHeight) != 0) {
++			return zcDecline(21, "scanout: the display stream is not the ABL's panel setup (CPU copy)", id);
++		}
++		fScanoutOn = true;
++		IOLog("SWEET FB: scanout on: the display reads the frames itself, no CPU copy\n");
++	}
++	if (sx != 0 || sy != 0 || dx != 0 || dy != 0 || w != (int32_t)fLogicalW || h != (int32_t)fLogicalH ||
++	    s->width != fLogicalW || s->height != fLogicalH || s->pixelFormat != SWEET_FB_FORMAT_BGRA ||
++	    s->bytesPerElement != 4 || s->elementWidth != 1 || s->elementHeight != 1 || s->planeCount > 1 ||
++	    s->bytesPerRow < s->width * 4 || s->bytesPerRow > 0xffff || (s->offset & 0xf) != 0) {
++		return zcDecline(22, "scanout: not a lone full-canvas BGRA surface", id);
++	}
++	const uint32_t dstW = (uint32_t)((uint64_t)fLogicalW * fScaleXNum / fScaleXDen);
++	const uint32_t dstH = (uint32_t)((uint64_t)fLogicalH * fScaleYNum / fScaleYDen);
++	if (fScale == 0 || dstW == 0 || dstH == 0 || dstW > fWidth || dstH > fHeight) {
++		return zcDecline(23, "scanout: destination rectangle outside the panel", id);
++	}
++	const uint32_t iova = scanoutIova(s);
++	if (iova == 0) {
++		return zcDecline(24, "scanout: no free IOVA slot", id);
++	}
++	/*
++	 * The GPU wrote the surface (it bypasses the CPU cache); a CPU-drawn frame keeps dirty lines in
++	 * the write-back mapping, so clean it to memory for the pipe.
++	 */
++	uintptr_t kva = s->kernelAddress();
++	if (kva != 0) {
++		sweet_dma_sync_va((const void *)(kva + s->offset), (size_t)((uint64_t)s->bytesPerRow * fLogicalH));
++	}
++	struct sweet_scan_frame f;
++	f.iova = iova + s->offset;
++	f.stride = s->bytesPerRow;
++	f.src_x = 0;
++	f.src_y = 0;
++	f.src_w = fLogicalW;
++	f.src_h = fLogicalH;
++	f.dst_x = (uint32_t)(fPadX < 0 ? 0 : fPadX);
++	f.dst_y = (uint32_t)(fPadY < 0 ? 0 : fPadY);
++	f.dst_w = dstW;
++	f.dst_h = dstH;
++	if (sweet_scanout_show(&f) != 0) {
++		return zcDecline(25, "scanout: the pipe refused the frame (earlier flush not taken)", id);
++	}
++	/* show() waited for the earlier flush: let the hold of the frame before it go, then hold this one */
++	zcPoll();
++	if (fZcCount >= 4) {
++		waitLatch();
++		zcPoll(true);
++	}
++	if (fZcCount >= 4) {
++		return zcDecline(26, "scanout: four earlier frames still waiting for their latch", id);
++	}
++	sweet_hold(s, true);
++	fZcHeld[fZcCount++] = s;        /* keeps the reference sweet_surface_copy gave */
++	fZcFront = true;
++	fLastFlush = (1u << 0) | SWEET_MDP_CTL_BIT;     /* VIG0 (sweet_mdp_pipes[0].flush) + the CTL itself */
++	__atomic_store_n(&fShotId, id, __ATOMIC_RELEASE);
++	__atomic_store_n(&fSwapScanID, fCurSwapID, __ATOMIC_RELEASE);
++	if (++fScanoutFrames == 1) {
++		IOLog("SWEET FB: first GPU scanout: surface %u at iova %#x (stride %u), %ux%u -> %ux%u at %u,%u, no copy\n",
++		    id, iova, s->bytesPerRow, fLogicalW, fLogicalH, dstW, dstH, f.dst_x, f.dst_y);
++	}
++	return true;
++}
++
+ void
+ AppleCLCD::zcStats(const char *when)
+ {
+@@ -2245,6 +2441,16 @@ AppleCLCD::zcPresent(const uint8_t *rec, uint32_t mask)
+ 		w = (int32_t)s->width;
+ 		h = (int32_t)s->height;
+ 	}
++	if (text == NULL && fScanout) {
++		/* 0268: the display reads this surface itself; on any refusal the caller copies the frame */
++		const bool ok = scanoutPresent(s, id, sx, sy, dx, dy, w, h);
++		if (ok) {
++			return true;
++		}
++		fScanoutRefused++;
++		OSSafeReleaseNULL(s);
++		return false;
++	}
+ 	if (text == NULL) {
+ 		if (sx < 0 || sy < 0) {
+ 			sx = sy = 0;
