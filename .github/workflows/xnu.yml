@@ -50,7 +50,7 @@ env:
   # the kernel (functionally harmless, but not byte-identical to an uncached build). The
   # runner workspace path is constant, so absolute paths in the hash cost nothing.
   CCACHE_COMPRESS: "1"
-  CCACHE_MAXSIZE: 2G
+  CCACHE_MAXSIZE: 5G
   # fresh checkouts/generated headers have new mtimes; contents are still hashed
   CCACHE_SLOPPINESS: include_file_mtime,include_file_ctime
   CCACHE_COMPILERCHECK: content
