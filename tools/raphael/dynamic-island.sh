@@ -25,7 +25,8 @@ fetch() {
 push_and_restart() {
 	sh "$U" ssh "cat > '$CACHE.tmp' && chmod 644 '$CACHE.tmp' && mv '$CACHE.tmp' '$CACHE' && ls -l '$CACHE'" < "$TMP.out"
 	# cfprefsd caches the file; SpringBoard re-reads MobileGestalt when it restarts
-	sh "$U" ssh 'killall -9 cfprefsd 2>/dev/null; kill $(ps -A -o pid= -o comm= | grep /System/Library/CoreServices/SpringBoard.app/SpringBoard | grep -v grep | cut -d" " -f1) 2>/dev/null; echo restarted'
+	# /bin/ps explicitly: toybox in /usr/local/bin has no ps applet, and PATH order differs per shell
+	sh "$U" ssh 'killall -9 cfprefsd 2>/dev/null; for p in $(/bin/ps -A -o pid= -o comm= | grep /System/Library/CoreServices/SpringBoard.app/SpringBoard | grep -v grep); do kill -9 $p 2>/dev/null; done; echo restarted'
 }
 
 case ${1:-} in
