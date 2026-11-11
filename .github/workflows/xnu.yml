@@ -58,7 +58,7 @@ env:
 jobs:
   build:
     # 15.x sources (xnu-11215): macos-15 with Xcode 16.2 (the macOS 15.2/15.3 era toolchain).
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
