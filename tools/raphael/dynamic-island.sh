@@ -9,6 +9,7 @@
 #
 # Needs the USB link (tools/raphael/usblink.sh ssh) and python3 on the host.
 set -eu
+die() { echo "dynamic-island: $*" >&2; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
 U=$HERE/usblink.sh
 CACHE=/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist
@@ -16,7 +17,8 @@ TMP=${TMPDIR:-/tmp}/mg-cache.$$
 KEY=DeviceSupportsDynamicIsland
 
 fetch() {
-	sh "$U" ssh "cat '$CACHE'" > "$TMP.in"
+	sh "$U" ssh "cat '$CACHE'" > "$TMP.in" 2>/dev/null || true
+	[ -s "$TMP.in" ] || die "no MobileGestalt cache at $CACHE (boot the device once, then retry)"
 	python3 "$HERE/mg-patch.py" --show "$TMP.in" "$KEY"
 }
 
