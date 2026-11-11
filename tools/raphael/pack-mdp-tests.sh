@@ -39,11 +39,12 @@ pack boot-ios18-mdp-probe.img "sweetfb_mdp=1 sweetfb_smmu=1 sweetfb_smmu_scan=1"
 pack boot-ios18-mdp-probe2.img "sweetfb_mdp=1 sweetfb_smmu=1 sweetfb_smmu_scan=1"   # 0265: late re-probe at 3/6/9 s
 pack boot-ios18-mdp-hw.img    "sweetfb_mdp=1 sweetfb_hw=1 sweetfb_smmu=1"
 pack boot-ios18-mdp-zc.img    "sweetfb_mdp=1 sweetfb_hw=1 sweetfb_zc=1"
+pack boot-ios18-scanout.img   "sweetfb_mdp=1 sweetfb_scale=2 sweetfb_scanout=1"   # 0268: full GPU scanout, no CPU copy
 
 echo "---"
 for f in "$OUTDIR"/boot-ios18-mdp-*.img; do
 	sha256sum "$f"
 done
-echo "boot with: fastboot boot $OUTDIR/boot-ios18-mdp-probe2.img   (0265 late probe)"
+echo "boot with: fastboot boot $OUTDIR/boot-ios18-scanout.img   (0268: the display reads Metal frames itself)"
 echo "judge by : 'SWEET MDP:' lines, 'SWEET SMMU: scan:' entries, mode= (copy/zc/direct),"
 echo "           zc_frames rising and copy_frames flat, kern.sweet_fb 'pace' line (patch 0264)"
