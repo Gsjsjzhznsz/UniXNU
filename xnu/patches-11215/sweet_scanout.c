@@ -163,11 +163,19 @@ struct sc_tables {
 	unsigned used;                  /* pages taken (page 0 is the level-1 table) */
 };
 
-/* Clean a table word to the point of coherency (by VA: flush_dcache64 is a no-op here). */
+/*
+ * A table write has reached DRAM once the barrier completes: the tables live in the splash
+ * carve-out, mapped uncached (ml_io_map is device memory), so the stores bypass the cache and
+ * there is nothing to clean. "dc cvac" must NOT be used here: cache maintenance on device
+ * memory is unpredictable and raised an unaligned data abort at the 9th mapped page (L3 entry 8)
+ * on raphael. A data-synchronisation barrier is all this needs.
+ */
 static void
 sc_clean(void *va, unsigned len)
 {
-	sweet_dma_sync_va(va, len);
+	(void)va;
+	(void)len;
+	__asm__ volatile ("dsb sy" ::: "memory");
 }
 
 /* Physical address of the 4 KiB table holding entry E. */
@@ -497,7 +505,11 @@ sc_init_locked(uint64_t panel_pa, uint32_t rowbytes, uint32_t w, uint32_t h)
 	sc.t.va = (uint64_t *)tva;
 	sc.t.pa = tbl_pa;
 	sc.t.used = 1;
-	bzero((void *)tva, SC_POOL_PAGES * 0x1000);
+	/* zero with plain 64-bit stores: a bzero may use 16-byte stores, which device memory need not take */
+	for (uint32_t i = 0; i < SC_POOL_PAGES * (0x1000u / 8u); i++) {
+		((volatile uint64_t *)tva)[i] = 0;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
 	const uint64_t lo = panel_pa;
 	const uint64_t hi = panel_pa + SC_SPLASH_SPAN;
 	sc.panel_pa = panel_pa;
