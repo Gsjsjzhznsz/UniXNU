@@ -245,7 +245,7 @@ index 0000000000000000000000000000000000000000..398855e3cc3e5c15e9f432b030f23e97
 +	error = (((s2cr >> 16) & 3) == 0 && (s2cr & 0xff) == (uint32_t)smmu_cb) ? 0 : EIO;
 +out:
 +	__atomic_store_n(&smmu_lock, 0, __ATOMIC_RELEASE);
-+	{ static int zcDone; if (!zcDone) { int zc = 0; zcDone = 1; PE_parse_boot_argn("sweetfb_zc", &zc, sizeof(zc)); if (zc) { unsigned zsid = 0x800; PE_parse_boot_argn("sweetfb_zc_sid", &zsid, sizeof(zsid)); (void)sweet_smmu_map_sid(zsid); printf("SWEET SMMU: zc pre-map sid 0x%x\n", zsid); } } } return error;
++	return error;
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
