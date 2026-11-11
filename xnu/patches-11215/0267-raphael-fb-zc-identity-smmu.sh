@@ -10,12 +10,10 @@
 # PA == IOVA holds afterwards), then treat "identity-mapped" like "bypass" in the zc decision.
 # Boot args: sweetfb_zc=1 sweetfb_zcforce=1 [sweetfb_zc_sid=0x800].
 set -eu
-REL=iokit/Kernel/arm/SweetFramebuffer.cpp
-F=""
-for d in . xnu ../xnu ../../xnu; do
-    if [ -f "$d/$REL" ]; then F="$d/$REL"; break; fi
-done
-[ -n "$F" ] || { echo "0267: $REL not found (cwd $(pwd))" >&2; exit 1; }
+REL=SweetFramebuffer.cpp
+F=$(find . -maxdepth 8 -name "$REL" -path "*iokit*" 2>/dev/null | head -1)
+[ -n "$F" ] || F=$(find . -maxdepth 8 -name "$REL" 2>/dev/null | head -1)
+[ -n "$F" ] || { echo "0267: $REL not found (cwd $(pwd))"; ls -d */ 2>/dev/null | head -8; exit 1; }
 echo "0267: patching $F"
 python3 - "$F" <<'PY'
 import sys
