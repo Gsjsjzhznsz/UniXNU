@@ -34,8 +34,8 @@ index 52138c59d48fb1cd03bee08949fd362cfa85fde7..650d50d7193ac8f0f200f8f2d42fa03f
  			} else {
 +				int force = 0;
 +				PE_parse_boot_argn("sweetfb_zcforce", &force, sizeof(force));
-+				if (force && !fZcOK) { extern int sweet_smmu_map_sid(unsigned); unsigned zsid = 0x800; PE_parse_boot_argn("sweetfb_zc_sid", &zsid, sizeof(zsid)); IOLog("SWEET FB: zc: sid 0x%x identity map -> %d\n", zsid, sweet_smmu_map_sid(zsid));
-+					fZcOK = true;
++				if (force && !fZcOK) {
++					fZcOK = true; { extern int sweet_smmu_map_sid(unsigned); sweet_smmu_map_sid(0x800); }
 +					IOLog("SWEET FB: sweetfb_zcforce=1: MDP SMMU treated as bypass although the probe did not say so "
 +					    "(an unmapped fetch can reset the SoC)\n");
 +				}
