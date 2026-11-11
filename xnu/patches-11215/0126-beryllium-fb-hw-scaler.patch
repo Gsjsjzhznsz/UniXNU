@@ -658,7 +658,7 @@ index 556a084962f667e9c802a5cb77c96399e7e2333c..52138c59d48fb1cd03bee08949fd362c
 +		IOLog("SWEET FB: hw scaler: boot pipe is not a VIG pipe; CPU scaling\n");
 +		return false;
 +	}
-+	if (fQseedVer != 0x1002 && fQseedVer != 0x1003) {
++	if (fQseedVer != 0x1002 && fQseedVer != 0x1003 && fQseedVer != 0x1004) {
 +		IOLog("SWEET FB: hw scaler: QSEED3 version 0x%x not handled; CPU scaling\n", fQseedVer);
 +		return false;
 +	}
