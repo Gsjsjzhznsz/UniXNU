@@ -45,6 +45,7 @@ zero-copy 补丁的真实缺陷。
 | 6 | wochgn/UniXNU-guacamole | SM8150 | gop-handoff | 否 | 无（外部 ios-sweet） |
 | 7 | drx1x2/UniXNU-flashlm | SM8150 | gop-handoff | 否 | 无 |
 | 8 | dragon120820/UniXNU-sdm845-common | SDM845 | none | 否 | 无 |
+| 9 | **giannoccarol/UniXNU-andromeda** | **SM8150** | **dpu-direct** | **是（实测）** | 原生 A640 + Metal |
 
 待补（后台扫描中）：cocopaim15/UniXNU-alphaplus（SM8150）、
 giannoccarol/UniXNU-andromeda（SM8150）、FFT-infra/UniXNU-alioth（SM8250）、
@@ -190,34 +191,43 @@ tick 3/6/9 只重读；但若 `start()` 映射失败，会在 vsync 统计上下
 
 ---
 
-## 5. raphael zero-copy 的正确路线
+## 5. raphael zero-copy 的正确路线（已实现：patch 0268）
 
 现有 0126/0127 的 beryllium 路线（BYPASS + Poco F1 low pool）在 raphael 上
-不可行。两条可行路线：
+不可行。扫描中发现 **`giannoccarol/UniXNU-andromeda` 是与 raphael 完全同
+SoC（SM8150 + Adreno 640）、同面板（1080x2340）、同画布（1125x2436）的
+fork，且已经实现并实测了零拷贝 DPU 直扫**（`xnu/andromeda_scanout.c`，
+patch 0207，实测 29.6–30.4 fps、0 丢帧，CPU 拷贝版 23.8–30.5 fps、每 30 s
+丢 16–100 帧）。因此直接移植它，而不是新写。
 
-### 路线 1（推荐）：照搬 GopFramebuffer 的 stage-1 窗口
-1. 在 apps_smmu 的显示 context bank（cb2）装原生 4K stage-1 页表，
-   TCR2 SEP `17:15` 置位，使 IOVA bit31 走翻译（参考 sheng `dpu-scanout=2`）。
-2. 把 compositor 的 canvas surface（BGRA、64B 行对齐）映射进该 cb2 的
-   IOVA；MDP/SSPP SRC0 写 IOVA。
-3. 补 GPU fence-before-flip：swap 完成前等 `sweet_gpu_fence_passed`。
-4. 不再需要 `fZcOK == bypass`；`zcPresent()` 的门槛改为「surface 已映射进
-   cb2」。
-5. 复用本仓 0127 的 hold/cooling/缓存 clean（`sweet_dcache_clean_va`），
-   但 low pool 换成「按 cb2 已映射的 IOVA 分配」，或直接映射 xnu 已管理
-   的高地址 RAM（走 SMMU 翻译，不再受 4 GiB 限制——这是 stage-1 路线的
-   最大红利）。
+### 已实现：0268（`sweet_scanout.c` + `0268-sweet-fb-gpu-scanout.patch`）
+1. 显示流 = apps_smmu SID 0x800（SMR 3）→ context bank 2（TRANSLATE，
+   正是 0263 探到的状态；**不需要 BYPASS**）。
+2. 给 cb2 装 4K stage-1 表，TCR2 SEP `17:15`，32-bit 输入空间；面板
+   所在 36 MiB splash carve-out 原地址映射（copy 回退和 console 仍用物理
+   地址）；surface 放进 8 × 16 MiB IOVA 槽（0x80000000 起）。
+3. **关键约束（扫描时发现，两次尝试都踩过）**：
+   - 页表必须低于 4 GiB —— 本板 xnu 管理的 RAM 全在 4 GiB 以上，`kmem_alloc_contig`
+     拿不到；0268 把页表放在 splash carve-out 尾部（+35.875 MiB，512 KiB）。
+   - 必须把整个 36 MiB carve-out 的物理地址也映射进去，否则一旦翻译打开，
+     copy 回退的后台缓冲（fBufPA[1/2]）就读不到了。
+4. QSEED3 做 1125x2436 → 1080x2340（`sweetfb_scale=2`）。
+5. 失败即回退：pipe 不是 ABL 的原设置 / SMMU fault / flush 未在 100 ms 内
+   被取走 → 关闭扫描，继续 CPU 拷贝（fail-closed）。panic 时 pipe 回到
+   面板内存。
+6. 开机参数：`sweetfb_mdp=1 sweetfb_flip=1 sweetfb_scale=2 sweetfb_scanout=1`
+   （不加 `sweetfb_scanout` 则行为与之前完全一致）。
 
-### 路线 2（保守）：raphael 专用 low pool + identity-map
-1. 用 `sweetfb_smmu_scan=1` 读出 raphael 真正的 SMR/S2CR，确认 MDP 流。
-2. 写 raphael 专用 `sweet_lowpool_known[]`（从 raphael live DT 抄
-   reserved-memory）+ 正确 `MIN/MAX`。
-3. 用 0094 的 `sweet_smmu_map_sid(0x800)` 把该窗口 identity-map 进 cb2，
-   使 PA==IOVA，从而 MDP 在 TRANSLATE 下也能取到。
-4. 仍需通过本仓 0127 的 hold/cooling 保证不重用。
-
-路线 1 更彻底（摆脱 4 GiB 和 bypass 两个约束），但工作量大；路线 2 改动
-小、能先跑通 zc_frames>0。
+### 尚未做（下一步）
+- 上机验证：`fastboot boot boot-ios18-scanout.img`，看日志
+  `SWEET SCANOUT:` 与 `SWEET FB: first GPU scanout`，确认 `shows` 上升、
+  不再有 copy。
+- 若 raphael 的 INTF1 tear-check/autorefresh 或 VIG0 基址与 andromeda 不同，
+  0268 会安全拒绝（返回 ENODEV）；届时用 `sweetfb_smmu_scan=1` + 0265 的
+  延迟探针读出真实值再改常量。
+- SwapWait 门控：本仓 0216 的 `fSwapSync`/`fSwapDone` 已在 scanout 路径
+  复用（`fLastFlush` 设为 VIG0|CTL），但仍建议沿 andromeda 0207 的
+  `sweet_swap_done()` 完整实现，避免 CA 画到正在扫描的 surface 上。
 
 ---
 
