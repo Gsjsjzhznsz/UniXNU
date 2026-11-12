@@ -15,7 +15,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..15ebee60b5145db4d51de2128a34478bb2bfc285
 --- /dev/null
 +++ b/bsd/dev/sweet_reboot.c
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,241 @@
 +/*
 + * Poco F1 (beryllium) reboot: the SoC reset path, with a reboot reason.
 + *
