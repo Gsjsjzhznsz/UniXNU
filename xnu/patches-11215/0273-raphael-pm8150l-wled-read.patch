@@ -1,0 +1,18 @@
+fb: allow the PM8150L WLED reads on raphael (SID 5, not PMI8998 SID 3)
+
+raphael's backlight WLED is in the PM8150L at SPMI usid 5 (reg <0xd800>,
+<0xd900>, interrupts <0x5 0xd8 ...>), not PMI8998 usid 3. The SPMI read
+whitelist for the non-beryllium branch only accepts sid 0, so blInit could
+not read the WLED brightness, fBlOK stayed false and the backlight never
+followed iOS. Extend the else branch to also accept sid 5 for the WLED
+control/sink peripherals (0xd8/0xd9).
+
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -131,3 +131,4 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+ 	} else {
+-		allowed = sid == 0 && (peripheral == 0x10 || peripheral == 0x11 ||
+-		    peripheral == 0x12 || peripheral == 0x13 || peripheral == 0x48);
++		allowed = (sid == 0 && (peripheral == 0x10 || peripheral == 0x11 ||
++		    peripheral == 0x12 || peripheral == 0x13 || peripheral == 0x48)) ||
++		    (sid == 5 && (peripheral == 0xd8 || peripheral == 0xd9));
