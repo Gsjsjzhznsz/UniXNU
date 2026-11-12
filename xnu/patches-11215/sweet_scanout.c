@@ -677,18 +677,12 @@ sc_panic_callout(void *arg, kdp_event_t event)
 		mdp_wr(SC_QSEED + sc_qseed_saved[i], sc.qseed[i]);
 	}
 	if (sc.pp && sc.vig1_on) {
-		for (unsigned i = 0; i < SC_SAVED_SSPP; i++) {
-			mdp_wr(SC_VIG1 + sc_sspp_saved[i], sc.sspp1[i]);
-		}
-		for (unsigned i = 0; i < SC_SAVED_QSEED; i++) {
-			mdp_wr(SC_QSEED1 + sc_qseed_saved[i], sc.qseed1[i]);
-		}
 		mdp_wr(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_OP, sc.blend_op);
 		mdp_wr(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_ALPHA, sc.blend_alpha);
 		mdp_wr(SC_CTL0 + CT_LAYER0, sc.layer0);
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
-	mdp_wr(SC_CTL0 + CT_FLUSH, CT_FLUSH_VIG0 | CT_FLUSH_VIG1 | CT_FLUSH_LM0 | CT_FLUSH_CTL);
+	mdp_wr(SC_CTL0 + CT_FLUSH, CT_FLUSH_VIG0 | CT_FLUSH_LM0 | CT_FLUSH_CTL);
 	sc.on_panel = true;
 }
 
@@ -881,17 +875,14 @@ sweet_scanout_panel(void)
 	}
 	uint32_t flush = CT_FLUSH_VIG0 | CT_FLUSH_CTL;
 	if (sc.pp && sc.vig1_on) {
-		/* put VIG1 back the way the ABL left it and drop it from the mixer */
-		for (unsigned i = 0; i < SC_SAVED_SSPP; i++) {
-			mdp_wr(SC_VIG1 + sc_sspp_saved[i], sc.sspp1[i]);
-		}
-		for (unsigned i = 0; i < SC_SAVED_QSEED; i++) {
-			mdp_wr(SC_QSEED1 + sc_qseed_saved[i], sc.qseed1[i]);
-		}
+		/* drop VIG1 from the mixer and put its blend block back; the pipe's own registers are
+		 * left as show() programmed them because removing it from LAYER0 is what stops it. Its
+		 * flush bit is deliberately NOT flushed: once the pipe is out of the mixer the hardware
+		 * never takes a VIG1 flush, which made waitLatch spin on it for the full 25 ms. */
 		mdp_wr(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_OP, sc.blend_op);
 		mdp_wr(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_ALPHA, sc.blend_alpha);
 		mdp_wr(SC_CTL0 + CT_LAYER0, sc.layer0);
-		flush |= CT_FLUSH_VIG1 | CT_FLUSH_LM0;
+		flush |= CT_FLUSH_LM0;
 		sc.vig1_on = false;
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
