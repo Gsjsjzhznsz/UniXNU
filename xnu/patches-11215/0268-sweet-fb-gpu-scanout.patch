@@ -107,7 +107,7 @@ index 05bf11f..f2ad606 100644
  		if (fZc && fZcOK) {
  			bool nosync = fZcCleanMode == 0 || fZcCleanMode == 2;
  			sweet_lowpool_gpu_nosync(nosync);
-@@ -2185,6 +2230,157 @@ AppleCLCD::zcReleaseAll(void)
+@@ -2185,6 +2230,158 @@ AppleCLCD::zcReleaseAll(void)
  	fZcFront = false;
  }
  
@@ -151,7 +151,8 @@ index 05bf11f..f2ad606 100644
 +		fScanoutMaps[slot].s = NULL;
 +	}
 +	const uint64_t len = s->memory->getLength();
-+	if (len == 0 || len > (uint64_t)sizeof(pages)) {
++	/* pages[] holds 4096 entries: compare BYTES against entries x 4096, not sizeof(pages) (32 KiB) */
++	if (len == 0 || len > (uint64_t)(sizeof(pages) / sizeof(pages[0])) * 4096ull) {
 +		return 0;
 +	}
 +	if (s->memory->prepare() != kIOReturnSuccess) {
