@@ -184,7 +184,7 @@ index 7f525c7cc8b144bf1f75e9aba3bf5846b73cd680..f1aea0ea4ca37a12a49eac51b45092f6
 +static bool
 +sp_write_allowed(unsigned sid, unsigned addr, unsigned len)
 +{
-+	if (sid != (sweet_board_raphael() ? 5u : 3u) || len < 1 || len > 2) {
++	if (!sweet_board_beryllium() || sid != 3 || len < 1 || len > 2) {
 +		return false;
 +	}
 +	switch (addr) {
@@ -1099,7 +1099,7 @@ index 556a084962f667e9c802a5cb77c96399e7e2333c..52138c59d48fb1cd03bee08949fd362c
 + * The control module (0xd846 MOD_EN bit 7) is never written: the fade only
 + * moves the brightness and leaves the driver stage as ABL set it up.
 + */
-+#define SWEET_WLED_SID          (sweet_board_raphael() ? 5u : 3u)
++#define SWEET_WLED_SID          3
 +#define SWEET_WLED_SINK         0xd900u
 +#define SWEET_WLED_MOD_EN       0xd846u
 +#define SWEET_WLED_SYNC         (SWEET_WLED_SINK + 0x47u)

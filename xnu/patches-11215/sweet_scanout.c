@@ -114,15 +114,15 @@ extern void IOSleep(unsigned int milliseconds);
 /*
  * LM0 blend (dpu_hw_lm.c, sdm845_lm_sblk shared by SM8150): blendstage_base 0x20, stride 0x18,
  * mixer value 2 = the first blend stage above the base (value 1 = base, no blend block).
- * CONST_ALPHA is the sdm845 packed register (bg << 16) | fg; the blend op 0 uses the constants.
+ * CONST_ALPHA is the sdm845 packed register (fg << 16) | bg; the blend op 0 uses the constants.
  */
 #define SC_LM_BLEND0       0x20u
 #define SC_LM_BLEND_STRIDE 0x18u
 #define SC_LM_BLEND_OP     0x00u
 #define SC_LM_BLEND_ALPHA  0x04u
 #define SC_BLEND_OP_CONST  0x000u        /* FG alpha from the constant, BG from the constant, no invert */
-#define SC_BLEND_VIG1_ON   0x000000ffu    /* CONST_ALPHA: fg 0xff (VIG1 opaque) */
-#define SC_BLEND_VIG0_ON   0x00ff0000u    /* CONST_ALPHA: fg 0x00, bg 0xff (VIG1 transparent, base shows) */
+#define SC_BLEND_VIG1_ON   0x00ff0000u    /* CONST_ALPHA: fg in bits 23:16, bg in bits 7:0 */
+#define SC_BLEND_VIG0_ON   0x000000ffu    /* fg 0x00, bg 0xff (VIG1 transparent, base shows) */
 /* INTF tear check, DPU >= 5 (dpu_hw_intf.c) */
 #define IF_TEAR_CHECK_EN  0x284u
 #define IF_TEAR_LINE      0x2b0u
@@ -648,7 +648,13 @@ sc_init_locked(uint64_t panel_pa, uint32_t rowbytes, uint32_t w, uint32_t h)
 		for (unsigned i = 0; i < SC_SAVED_QSEED; i++) {
 			sc.qseed1[i] = mdp_rd(SC_QSEED1 + sc_qseed_saved[i]);
 		}
-		sc.pp = true;
+		/*
+		 * 0272 is not ready for hardware use. The existing framebuffer releases
+		 * every hold except the newest after one latch, but both attached pipes
+		 * can still fetch their surfaces. Keep the proven single-pipe path until
+		 * per-pipe retirement and the full VIG1 fetch setup are implemented.
+		 */
+		sc.pp = false;
 	}
 	printf(SC_TAG " VIG1 qseed3 %08x fmt %08x op %08x src %08x; CTL layer0 %08x (VIG0 mix %u -> VIG1 mix %u); LM0 blend off %04x op %08x alpha %08x: %s\n",
 	    v1q, v1fmt, v1op, v1src, sc.layer0, sc.layer0 & 7u, sc.vig1_mix,

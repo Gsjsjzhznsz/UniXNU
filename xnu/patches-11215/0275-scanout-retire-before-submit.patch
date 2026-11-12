@@ -1,0 +1,48 @@
+fb: preflight single-pipe retirement and hold IOSurface before mapping
+
+Retire any already latched frame and check hold capacity before mapping or
+submitting a replacement. Protect the new IOSurface before mapping/cache work,
+and undo that protection on map or pre-submit refusal. Count successful direct
+submissions and CPU time in existing zc statistics; these measure submit work,
+not hardware display completion.
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -2368,8 +2368,15 @@
+ 	if (fScale == 0 || dstW == 0 || dstH == 0 || dstW > fWidth || dstH > fHeight) {
+ 		return zcDecline(23, "scanout: destination rectangle outside the panel", id);
+ 	}
++	/* Retire completed work and protect the surface before mapping/cache work. */
++	zcPoll();
++	if (fZcCount >= 4) {
++		return zcDecline(26, "scanout: hold queue full before submit", id);
++	}
++	sweet_hold(s, true);
+ 	const uint32_t iova = scanoutIova(s);
+ 	if (iova == 0) {
++		sweet_hold(s, false);
+ 		return zcDecline(24, "scanout: no free IOVA slot", id);
+ 	}
+ 	/*
+@@ -2401,19 +2408,11 @@
+ 	f.dst_y = (uint32_t)(fPadY < 0 ? 0 : fPadY);
+ 	f.dst_w = dstW;
+ 	f.dst_h = dstH;
++	/* A nonzero result is returned only before show programs or triggers the pipe. */
+ 	if (sweet_scanout_show(&f) != 0) {
++		sweet_hold(s, false);
+ 		return zcDecline(25, "scanout: the pipe refused the frame (earlier flush not taken)", id);
+ 	}
+-	/* show() waited for the earlier flush: let the hold of the frame before it go, then hold this one */
+-	zcPoll();
+-	if (fZcCount >= 4) {
+-		waitLatch();
+-		zcPoll(true);
+-	}
+-	if (fZcCount >= 4) {
+-		return zcDecline(26, "scanout: four earlier frames still waiting for their latch", id);
+-	}
+-	sweet_hold(s, true);
+ 	fZcHeld[fZcCount++] = s;        /* keeps the reference sweet_surface_copy gave */
+ 	fZcFront = true;
+ 	fLastFlush = sweet_scanout_flush_bits();        /* the pipe's own flush bits (VIG0/VIG1 + LM0 + CTL, 0272) */
