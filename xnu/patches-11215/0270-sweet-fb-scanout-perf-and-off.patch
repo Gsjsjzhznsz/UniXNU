@@ -1,0 +1,63 @@
+fb: no per-frame cache clean on GPU frames, and put the pipe back on the panel when the screen goes off
+
+The first working GPU scanout run on raphael was unusably slow because scanoutPresent
+cleaned the whole 10.9 MB surface every frame (sweet_dma_sync_va), which costs as much as
+the copy the path removes. The GPU bypasses the CPU cache, so only a CPU-drawn frame needs
+it, with the same gpuBlits/cpuWrites test the low-pool path uses.
+
+Also: with the pipe still reading the last CoreAnimation surface when the display went off,
+a stale corner stayed visible (the white dot bottom-left). Put the pipe back on the panel
+memory (sweet_scanout_panel) and release the holds in blackout().
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -1947,12 +1947,23 @@
+ AppleCLCD::blackout(void)
+ {
+ 	memset((void *)fPixels, 0, (size_t)fRowBytes * fHeight);
++	/*
++	 * 0270: with the GPU scanout the pipe may still be reading the last CoreAnimation surface, which
++	 * is why a stale corner stayed visible while the screen was off. Put the pipe back on the panel
++	 * memory first, then let the surfaces (and their IOVA slots) go.
++	 */
++	if (fScanout) {
++		(void)sweet_scanout_panel();
++	}
+ 	if (fFlip && (fFront != 0 || fHwOn)) {
+ 		scanTo(0);
+ 		if (fZc) {
+ 			waitLatch();
+ 			zcReleaseAll();
+ 		}
++	} else if (fScanout) {
++		waitLatch();
++		zcReleaseAll();
+ 	}
+ 	if (fZc) {
+ 		zcStats("display off");
+@@ -2348,12 +2359,22 @@
+ 		return zcDecline(24, "scanout: no free IOVA slot", id);
+ 	}
+ 	/*
+-	 * The GPU wrote the surface (it bypasses the CPU cache); a CPU-drawn frame keeps dirty lines in
+-	 * the write-back mapping, so clean it to memory for the pipe.
++	 * 0270: only a CPU-drawn frame needs a clean. The GPU bypasses the CPU cache, and cleaning the
++	 * whole 10.9 MB surface every frame cost as much as the copy this path removes (the first raphael
++	 * run was unusably slow because of exactly that). Same test as the low-pool path: did the GPU
++	 * write it since the last scan, and did a write-unlock happen since?
+ 	 */
+ 	uintptr_t kva = s->kernelAddress();
+ 	if (kva != 0) {
+-		sweet_dma_sync_va((const void *)(kva + s->offset), (size_t)((uint64_t)s->bytesPerRow * fLogicalH));
++		uint32_t gpuBlits = __atomic_load_n(&s->gpuBlits, __ATOMIC_ACQUIRE);
++		const bool gpuFrame = gpuBlits != s->gpuBlitsSeen;
++		s->gpuBlitsSeen = gpuBlits;
++		uint32_t cpuWrites = __atomic_load_n(&s->cpuWrites, __ATOMIC_ACQUIRE);
++		const bool cpuWrote = cpuWrites != s->cpuWritesSeen;
++		s->cpuWritesSeen = cpuWrites;
++		if (!gpuFrame || cpuWrote) {
++			sweet_dma_sync_va((const void *)(kva + s->offset), (size_t)((uint64_t)s->bytesPerRow * fLogicalH));
++		}
+ 	}
+ 	struct sweet_scan_frame f;
+ 	f.iova = iova + s->offset;
