@@ -1,0 +1,27 @@
+sweet fb: do not wait for a latch when nothing was handed to the MDP
+
+0268 turns on the honest swap completion (fEarly/fSwapSync) for the scanout mode, but
+when every scanout frame is declined the pipe is never programmed, fLastFlush stays 0 and
+swapWaitInner spins until its 1.5-frame limit answering kIOReturnBusy. CoreAnimation then
+stops submitting frames: on raphael that was 2810 swap_wait_timeouts and 35 swaps in 33
+minutes, so the picture froze and touches had no visible effect. Nothing handed over means
+nothing to latch, so answer done.
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -2185,6 +2185,15 @@
+ 	if (swapReady(id)) {
+ 		return kIOReturnSuccess;
+ 	}
++	/*
++	 * 0269: nothing has been handed to the MDP yet (no flipSetup, or every scanout frame declined), so
++	 * there is no latch to wait for. Without this the honest swap completion added by 0268 waits on
++	 * fLastFlush == 0 until the 1.5-frame limit and answers kIOReturnBusy for ever: CoreAnimation then
++	 * stops submitting frames and the UI freezes (raphael: 2810 swap_wait_timeouts, 35 swaps in 33 min).
++	 */
++	if (fLastFlush == 0) {
++		return kIOReturnSuccess;
++	}
+ 	volatile uint32_t *flush = (volatile uint32_t *)(fMdp + SWEET_MDP_CTL0 + SWEET_MDP_CTL_FLUSH);
+ 	uint64_t t0 = mach_absolute_time(), limit;
+ 	bool sawBusy = false, kicked = false;
