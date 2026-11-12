@@ -5,23 +5,28 @@ cleaned the whole 10.9 MB surface every frame (sweet_dma_sync_va), which costs a
 the copy the path removes. The GPU bypasses the CPU cache, so only a CPU-drawn frame needs
 it, with the same gpuBlits/cpuWrites test the low-pool path uses.
 
-Also: with the pipe still reading the last CoreAnimation surface when the display went off,
-a stale corner stayed visible (the white dot bottom-left). Put the pipe back on the panel
-memory (sweet_scanout_panel) and release the holds in blackout().
+On screen-off the pipe kept reading the last CoreAnimation surface (a stale corner stayed
+visible). Put it back on the panel memory first, and only release the surface holds when
+that took: releasing them while the pipe still reads them is what froze the panel.
 
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -1947,12 +1947,23 @@
+@@ -1947,12 +1947,28 @@
  AppleCLCD::blackout(void)
  {
  	memset((void *)fPixels, 0, (size_t)fRowBytes * fHeight);
 +	/*
 +	 * 0270: with the GPU scanout the pipe may still be reading the last CoreAnimation surface, which
-+	 * is why a stale corner stayed visible while the screen was off. Put the pipe back on the panel
-+	 * memory first, then let the surfaces (and their IOVA slots) go.
++	 * left a stale corner visible while the screen was off. Put the pipe back on the panel memory
++	 * first; only when that took (or there is no scanout) let the surfaces and their IOVA slots go.
++	 * Releasing them while the pipe still reads them is what froze the panel on the first raphael run.
 +	 */
++	bool scanPanelOk = true;
 +	if (fScanout) {
-+		(void)sweet_scanout_panel();
++		scanPanelOk = sweet_scanout_panel() == 0;
++	}
++	if (!scanPanelOk) {
++		IOLog("SWEET FB: display off: the pipe is still on the last frame, holds kept\n");
 +	}
  	if (fFlip && (fFront != 0 || fHwOn)) {
  		scanTo(0);
@@ -29,22 +34,22 @@ memory (sweet_scanout_panel) and release the holds in blackout().
  			waitLatch();
  			zcReleaseAll();
  		}
-+	} else if (fScanout) {
++	} else if (fScanout && scanPanelOk) {
 +		waitLatch();
 +		zcReleaseAll();
  	}
  	if (fZc) {
  		zcStats("display off");
-@@ -2348,12 +2359,22 @@
+@@ -2348,12 +2364,22 @@
  		return zcDecline(24, "scanout: no free IOVA slot", id);
  	}
  	/*
 -	 * The GPU wrote the surface (it bypasses the CPU cache); a CPU-drawn frame keeps dirty lines in
 -	 * the write-back mapping, so clean it to memory for the pipe.
 +	 * 0270: only a CPU-drawn frame needs a clean. The GPU bypasses the CPU cache, and cleaning the
-+	 * whole 10.9 MB surface every frame cost as much as the copy this path removes (the first raphael
-+	 * run was unusably slow because of exactly that). Same test as the low-pool path: did the GPU
-+	 * write it since the last scan, and did a write-unlock happen since?
++	 * whole 10.9 MB surface every frame costs as much as the copy this path removes (the first raphael
++	 * run was unusably slow because of exactly that). Same test as the low-pool path: did the GPU write
++	 * it since the last scan, and did a write-unlock happen since?
  	 */
  	uintptr_t kva = s->kernelAddress();
  	if (kva != 0) {
