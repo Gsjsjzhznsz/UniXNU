@@ -155,7 +155,7 @@ index 7f525c7cc8b144bf1f75e9aba3bf5846b73cd680..f1aea0ea4ca37a12a49eac51b45092f6
  {
  	if (sp_attempted) {
  		return sp_ready ? 0 : -1;
-@@ -96,8 +124,10 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+@@ -96,8 +124,15 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
  	unsigned peripheral = addr >> 8;
  	bool allowed;
  	if (sweet_board_beryllium()) {
@@ -165,10 +165,18 @@ index 7f525c7cc8b144bf1f75e9aba3bf5846b73cd680..f1aea0ea4ca37a12a49eac51b45092f6
 +		allowed = (sid == 2 && (peripheral == 0x10 || peripheral == 0x13 ||
 +		    peripheral == 0x40 || peripheral == 0x41)) ||
 +		    (sid == 3 && (peripheral == 0xd8 || peripheral == 0xd9));
- 	} else {
- 		allowed = sid == 0 && (peripheral == 0x10 || peripheral == 0x11 ||
- 		    peripheral == 0x12 || peripheral == 0x13 || peripheral == 0x48);
-@@ -135,4 +165,113 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
+-	} else {
+-		allowed = sid == 0 && (peripheral == 0x10 || peripheral == 0x11 ||
+-		    peripheral == 0x12 || peripheral == 0x13 || peripheral == 0x48);
++	} else if (sweet_board_raphael()) {
++		/* SID 5: PM8150L WLED ctrl 0xd8 / sink 0xd9 (raphael backlight, reads only here) */
++		allowed = (sid == 0 && (peripheral == 0x10 || peripheral == 0x11 ||
++		    peripheral == 0x12 || peripheral == 0x13 || peripheral == 0x48)) ||
++		    (sid == 5 && (peripheral == 0xd8 || peripheral == 0xd9));
++	} else {
++		allowed = sid == 0 && (peripheral == 0x10 || peripheral == 0x11 ||
++		    peripheral == 0x12 || peripheral == 0x13 || peripheral == 0x48);
+@@ -135,4 +170,113 @@ sweet_spmi_read(unsigned sid, unsigned addr, uint8_t *out)
  	IOLockUnlock(sp_lock);
  	return -1;
  }
@@ -184,7 +192,7 @@ index 7f525c7cc8b144bf1f75e9aba3bf5846b73cd680..f1aea0ea4ca37a12a49eac51b45092f6
 +static bool
 +sp_write_allowed(unsigned sid, unsigned addr, unsigned len)
 +{
-+	if (!sweet_board_beryllium() || sid != 3 || len < 1 || len > 2) {
++	if (sid != (sweet_board_raphael() ? 5u : 3u) || len < 1 || len > 2) {
 +		return false;
 +	}
 +	switch (addr) {
@@ -1099,7 +1107,7 @@ index 556a084962f667e9c802a5cb77c96399e7e2333c..52138c59d48fb1cd03bee08949fd362c
 + * The control module (0xd846 MOD_EN bit 7) is never written: the fade only
 + * moves the brightness and leaves the driver stage as ABL set it up.
 + */
-+#define SWEET_WLED_SID          3
++#define SWEET_WLED_SID          (sweet_board_raphael() ? 5u : 3u)
 +#define SWEET_WLED_SINK         0xd900u
 +#define SWEET_WLED_MOD_EN       0xd846u
 +#define SWEET_WLED_SYNC         (SWEET_WLED_SINK + 0x47u)
