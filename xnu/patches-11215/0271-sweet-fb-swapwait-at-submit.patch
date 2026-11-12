@@ -1,0 +1,32 @@
+fb: answer SwapWait at submit in scanout mode, and never block a whole panel frame on the latch
+
+Two measured serial waits made the UI feel stuck even with copy=0 (33 ms per frame at ~30 fps,
+40-60 ms end to end):
+
+1. swapWaitInner() waited 1.5 panel frames per swap (9.9 ms). The scanned surface is held in
+   fZcHeld until a later frame latches, so CoreAnimation cannot draw into it again: answering at
+   submit is safe. sweetfb_swapsync=1 still asks for the honest answer.
+2. sc_flush_idle() waited up to 25 ms for the previous CTL flush (16.2 ms per swap). The flush is
+   a one-shot latch: the registers written next are what the pending latch takes, so the newest
+   frame replaces the queued one. Wait 2 ms at most and count replacements instead of blocking.
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -838,7 +838,16 @@
+ 				if (fScanCopy) {
+ 					IOLog("SWEET FB: scan-out copy on (0235): frames are copied to three framebuffer-owned buffers, a swap is complete when copied\n");
+ 				}
+-				PE_parse_boot_argn("sweetfb_swapsync", &ss, sizeof(ss));
++				const bool ssGiven = PE_parse_boot_argn("sweetfb_swapsync", &ss, sizeof(ss));
++				/*
++				 * 0271: in the GPU scanout mode answer SwapWait at submit. The surface is held in
++				 * fZcHeld until the pipe has latched a later frame, so CoreAnimation cannot draw into
++				 * it again; waiting 1.5 panel frames (measured: 9.9 ms per swap) adds latency for
++				 * nothing. sweetfb_swapsync=1 still asks for the honest answer.
++				 */
++				if (fScanout && !ssGiven) {
++					ss = 0;
++				}
+ 				PE_parse_boot_argn("sweetfb_vsyncalign", &va, sizeof(va));
+ 				int lc = 1, nr = 0, lg = 0, vs = 0;
+ 				PE_parse_boot_argn("sweetfb_vsyncsmooth", &vs, sizeof(vs));

@@ -298,7 +298,7 @@ static struct {
 	struct sc_tables t;
 	bool slot_used[SC_SLOTS];
 	uint32_t sspp[SC_SAVED_SSPP], qseed[SC_SAVED_QSEED];
-	uint64_t shows, waits, faults;
+	uint64_t shows, waits, faults, replaced;   /* replaced: a flush was written over a pending one */
 } sc;
 
 static unsigned sc_mode = 0, sc_mode_parsed;
@@ -379,24 +379,30 @@ sc_tlb_flush(void)
 	return false;
 }
 
-/* Until CTL0 has taken the last flush, at most 25 ms (one 60 Hz frame and a half). */
+/*
+ * Give the previous CTL flush a moment to be taken, but never a whole panel frame.
+ *
+ * The flush is a one-shot latch: if the previous one is still pending, the address and geometry
+ * written next are what the pipe latches with it, so the newest frame replaces the queued one.
+ * Waiting for it to clear costs a full 60 Hz frame (measured 16.2 ms per swap on raphael) and that
+ * serial latency is what made the UI feel stuck even with zero CPU copies. 2 ms covers the normal
+ * near-latch case; a replaced frame is counted instead of blocking. Always true: the caller has
+ * nothing better to fall back to.
+ */
 static bool
 sc_flush_idle(void)
 {
-	for (unsigned i = 0; i < 70; i++) {
+	for (unsigned i = 0; i < 8; i++) {
 		if ((mdp_rd(SC_CTL0 + CT_FLUSH) & CT_FLUSH_BITS) == 0) {
 			if (i != 0) {
 				sc.waits++;
 			}
 			return true;
 		}
-		if (i < 20) {
-			delay(25);
-		} else {
-			sc_nap_us(500);
-		}
+		sc_nap_us(250);
 	}
-	return false;
+	sc.replaced++;
+	return true;
 }
 
 /* Fault status of the bank: counted, logged (first 8), cleared. True when there was a fault. */
@@ -811,10 +817,10 @@ sweet_scanout_ctl(unsigned mode, char *why, size_t len)
 		return EINVAL;
 	}
 	__atomic_store_n(&sc_mode, mode, __ATOMIC_RELAXED);
-	snprintf(why, len, "scanout %u (%s; hardware %s, %llu pipe updates, %llu waited for a frame, %llu SMMU faults)",
-	    mode, mode == 0 ? "CPU copy" : "the display reads Metal frames",
+	snprintf(why, len, "scanout %u (%s; hardware %s, %llu pipe updates, %llu waited, %llu replaced a "
+	    "pending frame, %llu SMMU faults)", mode, mode == 0 ? "CPU copy" : "the display reads Metal frames",
 	    sc.ready ? "set up" : sc.tried ? "refused, CPU copy" : "not set up yet", (unsigned long long)sc.shows,
-	    (unsigned long long)sc.waits, (unsigned long long)sc.faults);
+	    (unsigned long long)sc.waits, (unsigned long long)sc.replaced, (unsigned long long)sc.faults);
 	printf(SC_TAG " %s\n", why);
 	return 0;
 }
