@@ -178,10 +178,22 @@ ssh ... 'sysctl -w kern.sweet_reboot_mode=bootloader; /var/jb/usr/sbin/reboot'
 usid 与 `wled@d800` 基址，然后给 `sweet_scanout` 或 `0126` 加 raphael 分支。
 背光一旦可用，熄屏可以平滑降亮，不必走 `memset` 兜底，唤醒手感也会正常。
 
-### P1 latch 延迟 / 吞吐
-`latch_us` 每窗口 ~1.6 s、`gpu_holds` 上万、`hold_to=12`。当前 `show()` 前必等上一帧 flush
-被吸收（最多 25 ms），是串行的。**下一步**：双/三缓冲流水（写下一帧时上一帧还在扫），或把
-`sc_flush_idle` 的等待改成分段让出；注意别越过「同一 SSPP 不能有两个未 latch 的 flush」。
+### P1 串行等待（"拷贝已去掉但还是卡"的真因）
+实测每帧平均：**latch 等待 16.2 ms + SwapWait 9.9 ms**（`pace` 行 `latch_us=1623225`、
+`swap_wait_us=992400` 是 ×100 的定点数，即 16.23 ms / 9.92 ms），一帧 33 ms → ~30 fps，
+但端到端延迟 40–60 ms，所以滑动手感仍然差。`copy=0` 说明不是带宽/拷贝问题，是**串行**：
+
+1. `sweet_scanout_show()` 里的 `sc_flush_idle()`：同一个 SSPP 不能有两个未 latch 的 flush，
+   所以每个 swap 都要等上一帧被面板吸收（一个 60 Hz 帧 = 16.2 ms）。
+2. `swapWaitInner()`：每 swap 再等 1.5 帧（9.9 ms）。
+
+**下一步（按收益排序）**：
+- 把 `fSwapSync` 在 scanout 模式关掉（或 `sweetfb_swapdepth=0`）：surface 已经被 hold 到
+  「后面的帧 latch」，CA 不可能改写它，所以 `show()` 提交即可答复完成，直接省掉 9.9 ms。
+- 双 SSPP 乒乓（VIG0/VIG1 轮流）：写 A 时 B 还在扫，`sc_flush_idle` 的 16.2 ms 就没了。
+  注意两条 pipe 的 CTL flush 位不同（VIG0=bit0、VIG1=bit1），且 QSEED3 寄存器要各自编程。
+- 若暂时单 pipe：至少把 `sc_flush_idle` 的 20×`delay(25)` 预等待去掉，直接 nap 让出，
+  避免 work loop 上忙等。
 
 ### P2 多图层（动态岛 / 状态栏叠加）
 现在只接受「单图层、整 canvas」的帧，多图层直接退回拷贝（日志 `several layers are composed`）。
