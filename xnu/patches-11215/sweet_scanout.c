@@ -442,10 +442,16 @@ sc_init_locked(uint64_t panel_pa, uint32_t rowbytes, uint32_t w, uint32_t h)
 	printf(SC_TAG " vig0 %08x stride %u size %08x out %08x format %08x op %08x; qseed3 version %08x op %08x; "
 	    "intf1 tear check %08x autorefresh %08x\n", addr, stride, size, out, mdp_rd(SC_VIG0 + SS_SRC_FORMAT),
 	    mdp_rd(SC_VIG0 + SS_OP_MODE), sc.qseed_version, mdp_rd(SC_QSEED + QS_OP_MODE), te, ar);
-	if (addr != (uint32_t)panel_pa || panel_pa > 0xffffffffull || stride != rowbytes || size != ((h << 16) | w) ||
-	    out != size || !(ar & (1u << 31)) || (te & 1) == 0) {
-		printf(SC_TAG " the pipe is not the ABL's panel setup (panel %#llx %ux%u stride %u): CPU copy\n",
-		    (unsigned long long)panel_pa, w, h, rowbytes);
+	/*
+	 * The only thing that identifies the pipe is that it is fetching the panel memory: show() programs
+	 * SRC_SIZE/XY and OUT_SIZE/XY itself, so those need not match what the ABL left. Tear check and
+	 * autorefresh are informational too: they say how the panel is refreshed, not whether this pipe is
+	 * the display, and a video-mode panel latches a CTL flush at its next frame without either. The
+	 * trial flush below is the real functional test.
+	 */
+	if (addr != (uint32_t)panel_pa || panel_pa > 0xffffffffull || stride != rowbytes) {
+		printf(SC_TAG " not the pipe fetching the panel (src0 %08x != %#llx, stride %u != %u): CPU copy\n",
+		    addr, (unsigned long long)panel_pa, stride, rowbytes);
 		return ENODEV;
 	}
 	/* The stream: one valid stream match for SID 0x800, translating context, its bank off. */
