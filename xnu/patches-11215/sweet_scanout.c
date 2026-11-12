@@ -120,7 +120,6 @@ extern void IOSleep(unsigned int milliseconds);
 #define SC_LM_BLEND_STRIDE 0x18u
 #define SC_LM_BLEND_OP     0x00u
 #define SC_LM_BLEND_ALPHA  0x04u
-#define SC_LM_BLEND_VIG1   (SC_LM0 + SC_LM_BLEND0)
 #define SC_BLEND_OP_CONST  0x000u        /* FG alpha from the constant, BG from the constant, no invert */
 #define SC_BLEND_VIG1_ON   0x000000ffu    /* CONST_ALPHA: fg 0xff (VIG1 opaque) */
 #define SC_BLEND_VIG0_ON   0x00ff0000u    /* CONST_ALPHA: fg 0x00, bg 0xff (VIG1 transparent, base shows) */
@@ -326,6 +325,8 @@ static struct {
 	uint32_t blend_op, blend_alpha; /* VIG1's LM0 blend stage as the ABL left it */
 	bool pp, vig1_on;               /* pp: VIG0/VIG1 ping-pong; vig1_on: VIG1 joined the mixer */
 	unsigned cur;                   /* pipe that holds the newest frame (0 = VIG0, 1 = VIG1) */
+	uint32_t vig1_mix;              /* VIG1's mixer stage = VIG0's + 1 (one stage above the base pipe) */
+	uint32_t vig1_blend;            /* VIG1's LM0 blend block offset (BLEND0 + STRIDE*(mix-2)) */
 	uint32_t flush_bits;            /* CTL flush bits of the last show() (for SwapWait) */
 	uint64_t shows, waits, faults, replaced;   /* replaced: a flush was written over a pending one */
 } sc;
@@ -627,8 +628,15 @@ sc_init_locked(uint64_t panel_pa, uint32_t rowbytes, uint32_t w, uint32_t h)
 	sc.cur = 1;                 /* the first frame goes to VIG0, already the base pipe */
 	sc.flush_bits = CT_FLUSH_BITS;
 	sc.layer0 = mdp_rd(SC_CTL0 + CT_LAYER0);
-	sc.blend_op = mdp_rd(SC_LM_BLEND_VIG1 + SC_LM_BLEND_OP);
-	sc.blend_alpha = mdp_rd(SC_LM_BLEND_VIG1 + SC_LM_BLEND_ALPHA);
+	/*
+	 * VIG0 sits at some mixer stage the ABL chose (measured: value 5 on raphael, not 1). VIG1
+	 * must go one stage ABOVE it so the newest frame covers the previous one, and its blend
+	 * block follows from that stage (BLEND0 + STRIDE * (mix - 2)).
+	 */
+	sc.vig1_mix = (sc.layer0 & 7u) + 1u;
+	sc.vig1_blend = SC_LM_BLEND0 + SC_LM_BLEND_STRIDE * (sc.vig1_mix - 2u);
+	sc.blend_op = mdp_rd(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_OP);
+	sc.blend_alpha = mdp_rd(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_ALPHA);
 	const uint32_t v1q = mdp_rd(SC_QSEED1 + QS_HW_VERSION);
 	const uint32_t v1fmt = mdp_rd(SC_VIG1 + SS_SRC_FORMAT);
 	const uint32_t v1op = mdp_rd(SC_VIG1 + SS_OP_MODE);
@@ -642,8 +650,9 @@ sc_init_locked(uint64_t panel_pa, uint32_t rowbytes, uint32_t w, uint32_t h)
 		}
 		sc.pp = true;
 	}
-	printf(SC_TAG " VIG1 qseed3 %08x fmt %08x op %08x src %08x; CTL layer0 %08x; LM0 blend op %08x alpha %08x: %s\n",
-	    v1q, v1fmt, v1op, v1src, sc.layer0, sc.blend_op, sc.blend_alpha,
+	printf(SC_TAG " VIG1 qseed3 %08x fmt %08x op %08x src %08x; CTL layer0 %08x (VIG0 mix %u -> VIG1 mix %u); LM0 blend off %04x op %08x alpha %08x: %s\n",
+	    v1q, v1fmt, v1op, v1src, sc.layer0, sc.layer0 & 7u, sc.vig1_mix,
+	    sc.vig1_blend, sc.blend_op, sc.blend_alpha,
 	    sc.pp ? "VIG0/VIG1 ping-pong" : "VIG1 not a VIG pipe, single-pipe scanout");
 	sc.on_panel = true;
 	return 0;
@@ -674,8 +683,8 @@ sc_panic_callout(void *arg, kdp_event_t event)
 		for (unsigned i = 0; i < SC_SAVED_QSEED; i++) {
 			mdp_wr(SC_QSEED1 + sc_qseed_saved[i], sc.qseed1[i]);
 		}
-		mdp_wr(SC_LM_BLEND_VIG1 + SC_LM_BLEND_OP, sc.blend_op);
-		mdp_wr(SC_LM_BLEND_VIG1 + SC_LM_BLEND_ALPHA, sc.blend_alpha);
+		mdp_wr(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_OP, sc.blend_op);
+		mdp_wr(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_ALPHA, sc.blend_alpha);
 		mdp_wr(SC_CTL0 + CT_LAYER0, sc.layer0);
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
@@ -777,11 +786,11 @@ sweet_scanout_show(const struct sweet_scan_frame *f)
 		return EBUSY;
 	}
 
-	/* connect VIG1 to the mixer (value 2, one stage above the base) the first time it is used */
+	/* connect VIG1 to the mixer one stage above VIG0 the first time it is used */
 	if (sc.pp && pipe == 1 && !sc.vig1_on) {
-		mdp_wr(SC_CTL0 + CT_LAYER0, (sc.layer0 & ~(7u << SC_MIX_VIG1_SHIFT)) | (2u << SC_MIX_VIG1_SHIFT));
-		mdp_wr(SC_LM_BLEND_VIG1 + SC_LM_BLEND_OP, SC_BLEND_OP_CONST);
-		if (((mdp_rd(SC_CTL0 + CT_LAYER0) >> SC_MIX_VIG1_SHIFT) & 7u) == 2u) {
+		mdp_wr(SC_CTL0 + CT_LAYER0, (sc.layer0 & ~(7u << SC_MIX_VIG1_SHIFT)) | (sc.vig1_mix << SC_MIX_VIG1_SHIFT));
+		mdp_wr(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_OP, SC_BLEND_OP_CONST);
+		if (((mdp_rd(SC_CTL0 + CT_LAYER0) >> SC_MIX_VIG1_SHIFT) & 7u) == sc.vig1_mix) {
 			sc.vig1_on = true;
 			flush |= CT_FLUSH_LM0;
 		} else {
@@ -835,7 +844,7 @@ sweet_scanout_show(const struct sweet_scan_frame *f)
 
 	/* blend alpha: the VIG1 stage covers the base when it is the newest, is transparent otherwise */
 	if (sc.pp && sc.vig1_on) {
-		mdp_wr(SC_LM_BLEND_VIG1 + SC_LM_BLEND_ALPHA, pipe == 1 ? SC_BLEND_VIG1_ON : SC_BLEND_VIG0_ON);
+		mdp_wr(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_ALPHA, pipe == 1 ? SC_BLEND_VIG1_ON : SC_BLEND_VIG0_ON);
 		flush |= CT_FLUSH_LM0;
 	}
 
@@ -879,8 +888,8 @@ sweet_scanout_panel(void)
 		for (unsigned i = 0; i < SC_SAVED_QSEED; i++) {
 			mdp_wr(SC_QSEED1 + sc_qseed_saved[i], sc.qseed1[i]);
 		}
-		mdp_wr(SC_LM_BLEND_VIG1 + SC_LM_BLEND_OP, sc.blend_op);
-		mdp_wr(SC_LM_BLEND_VIG1 + SC_LM_BLEND_ALPHA, sc.blend_alpha);
+		mdp_wr(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_OP, sc.blend_op);
+		mdp_wr(SC_LM0 + sc.vig1_blend + SC_LM_BLEND_ALPHA, sc.blend_alpha);
 		mdp_wr(SC_CTL0 + CT_LAYER0, sc.layer0);
 		flush |= CT_FLUSH_VIG1 | CT_FLUSH_LM0;
 		sc.vig1_on = false;
