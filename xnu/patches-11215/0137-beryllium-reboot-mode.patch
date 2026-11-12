@@ -153,7 +153,9 @@ index 0000000000000000000000000000000000000000..15ebee60b5145db4d51de2128a34478b
 +{
 +	char arg[16] = "";
 +
-+	if (sr_ready || !sweet_board_beryllium()) {
++	/* raphael (SM8150) shares the PM8150 PON block and the IMEM restart_reason, so the same
++	 * reset path applies: only the plumbing was beryllium-gated. */
++	if (sr_ready || (!sweet_board_beryllium() && !sweet_board_raphael())) {
 +		return;
 +	}
 +	if (PE_parse_boot_argn("sweetreboot", arg, sizeof(arg))) {
@@ -169,7 +171,7 @@ index 0000000000000000000000000000000000000000..15ebee60b5145db4d51de2128a34478b
 +	if (sweet_spmi_init() == 0 && sweet_spmi_prepare_write(SR_PON_SID, SR_PON_SPARE) == 0) {
 +		sr_pon_ready = true;
 +	}
-+	sr_ready = sr_pshold != NULL;
++	sr_ready = sr_pshold != NULL || sweet_board_raphael();
 +	printf("SWEET REBOOT: boot-arg mode %s, PS_HOLD %s, IMEM %s, PON spare write %s\n",
 +	    sr_name(sr_bootarg), sr_pshold ? "mapped" : "NOT mapped",
 +	    sr_imem ? "mapped" : "NOT mapped", sr_pon_ready ? "ready" : "unavailable");
@@ -244,7 +246,9 @@ index 0000000000000000000000000000000000000000..15ebee60b5145db4d51de2128a34478b
 +		printf("SWEET REBOOT: IMEM restart_reason 0x146bf65c = 0x%08x\n", magic);
 +	}
 +	__asm__ volatile ("dsb sy" ::: "memory");
-+	*sr_pshold = 0;
++	if (sr_pshold != NULL) {
++		*sr_pshold = 0;
++	}
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +	delay(2000 * 1000);
 +	printf("SWEET REBOOT: PS_HOLD did not reset, PSCI SYSTEM_RESET\n");
