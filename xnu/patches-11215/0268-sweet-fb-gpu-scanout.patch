@@ -253,7 +253,7 @@ index 05bf11f..f2ad606 100644
 +	sweet_hold(s, true);
 +	fZcHeld[fZcCount++] = s;        /* keeps the reference sweet_surface_copy gave */
 +	fZcFront = true;
-+	fLastFlush = (1u << 0) | SWEET_MDP_CTL_BIT;     /* VIG0 (sweet_mdp_pipes[0].flush) + the CTL itself */
++	fLastFlush = sweet_scanout_flush_bits();        /* the pipe's own flush bits (VIG0/VIG1 + LM0 + CTL, 0272) */
 +	__atomic_store_n(&fShotId, id, __ATOMIC_RELEASE);
 +	__atomic_store_n(&fSwapScanID, fCurSwapID, __ATOMIC_RELEASE);
 +	if (++fScanoutFrames == 1) {

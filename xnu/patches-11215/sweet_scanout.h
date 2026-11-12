@@ -75,6 +75,9 @@ void sweet_scanout_unmap(uint32_t iova, uint32_t npages);
 int sweet_scanout_show(const struct sweet_scan_frame *f);
 int sweet_scanout_panel(void);
 
+/* The CTL flush bits of the last show()/panel(): the frame is latched when they are all clear. */
+uint32_t sweet_scanout_flush_bits(void);
+
 /* The last flush has been taken: the pipe reads what it was given last. */
 bool sweet_scanout_latched(void);
 /* The same, waiting for it at most MAX_MS (naps of 250 us, thread context). */
