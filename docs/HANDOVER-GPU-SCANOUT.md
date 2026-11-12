@@ -170,6 +170,9 @@ ssh ... 'sysctl -w kern.sweet_reboot_mode=bootloader; /var/jb/usr/sbin/reboot'
 
 ## 7. 未解决 / 下一步（按优先级）
 
+> 并行会话已在 `1944d59` 落地 **0272：VIG0/VIG1 乒乓**（`sweet_scanout.c` +156 行）。若你接手时
+> 已在跑，先复测 §0 的 fps/latch 数字再看下面两条。
+
 ### P0 背光与唤醒（用户最直接的手感问题）
 现象：熄屏要按好几次电源；`SWEET FB: backlight fade: cannot read WLED string 0 brightness; pixel fallback`。
 原因：`0126` 的 WLED 代码是 beryllium（PMI8998）的 `SID 3 / 0xd900`；raphael 的背光在
@@ -193,7 +196,7 @@ usid 与 `wled@d800` 基址，然后给 `sweet_scanout` 或 `0126` 加 raphael �
   latch，CA 改不了它，提交即答复 → 省 9.9 ms。
 - `sc_flush_idle` 改成最多 2 ms，pending flush 被下一次写入覆盖，计入 `sc.replaced` → 省 16.2 ms。
 
-**剩下的一条**：
+**剩下的一条（0272 已由并行会话落地，`1944d59`，待复测）**：
 - 双 SSPP 乒乓（VIG0/VIG1 轮流）：写 A 时 B 还在扫，彻底消掉那 2 ms 与单管串行。
   注意两条 pipe 的 CTL flush 位不同（VIG0=bit0、VIG1=bit1），QSEED3 要各自编程，LM0 blend
   两条都要使能。
