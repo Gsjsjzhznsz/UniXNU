@@ -63,6 +63,7 @@ scanout maps surface 220 @ iova 0x83000000
 `sweetfb_scanout=1` 打开 `fEarly/fSwapSync` |
 | `0269-sweet-fb-swapwait-nolatch.patch` | `swapWaitInner()`：`fLastFlush==0`（没有任何帧交给 MDP）直接算完成，避免冻屏 |
 | `0270-sweet-fb-scanout-perf-and-off.patch` | ① GPU 帧不再做 10.9 MB 缓存清理；② 熄屏时先把管道切回面板内存，切成功才释放 surface hold |
+| `0271-sweet-fb-swapwait-at-submit.patch` | ① scanout 模式下 SwapWait 提交即答复（省 9.9 ms/帧）；② `sc_flush_idle` 最多等 2 ms，pending flush 由新写入覆盖（省 16.2 ms/帧） |
 | `0137-beryllium-reboot-mode.patch`（改动） | 把 reboot-to-bootloader 开放到 raphael（PM8150 PON spare + IMEM + PSCI fallback），用于自愈循环 |
 
 ### 工具 / 资料
@@ -187,13 +188,19 @@ usid 与 `wled@d800` 基址，然后给 `sweet_scanout` 或 `0126` 加 raphael �
    所以每个 swap 都要等上一帧被面板吸收（一个 60 Hz 帧 = 16.2 ms）。
 2. `swapWaitInner()`：每 swap 再等 1.5 帧（9.9 ms）。
 
-**下一步（按收益排序）**：
-- 把 `fSwapSync` 在 scanout 模式关掉（或 `sweetfb_swapdepth=0`）：surface 已经被 hold 到
-  「后面的帧 latch」，CA 不可能改写它，所以 `show()` 提交即可答复完成，直接省掉 9.9 ms。
-- 双 SSPP 乒乓（VIG0/VIG1 轮流）：写 A 时 B 还在扫，`sc_flush_idle` 的 16.2 ms 就没了。
-  注意两条 pipe 的 CTL flush 位不同（VIG0=bit0、VIG1=bit1），且 QSEED3 寄存器要各自编程。
-- 若暂时单 pipe：至少把 `sc_flush_idle` 的 20×`delay(25)` 预等待去掉，直接 nap 让出，
-  避免 work loop 上忙等。
+**已在 0271 落地（`8a61ab3`，待有动画的界面下复测数字）**：
+- `fSwapSync` 在 scanout 模式默认关（`sweetfb_swapsync=1` 仍可开）：surface 已 hold 到后面的帧
+  latch，CA 改不了它，提交即答复 → 省 9.9 ms。
+- `sc_flush_idle` 改成最多 2 ms，pending flush 被下一次写入覆盖，计入 `sc.replaced` → 省 16.2 ms。
+
+**剩下的一条**：
+- 双 SSPP 乒乓（VIG0/VIG1 轮流）：写 A 时 B 还在扫，彻底消掉那 2 ms 与单管串行。
+  注意两条 pipe 的 CTL flush 位不同（VIG0=bit0、VIG1=bit1），QSEED3 要各自编程，LM0 blend
+  两条都要使能。
+
+**测量提醒**：`latch_us` / `swap_wait_us` 只在有帧提交时才有数。实测那几轮锁屏是静态的
+（`swaps` 几十次/分钟），抓 170 s 可能一个 swap 都没有。要测延迟，必须先让界面动起来
+（滑动、开 app、或切到动态壁纸），否则日志里全是 0。
 
 ### P2 多图层（动态岛 / 状态栏叠加）
 现在只接受「单图层、整 canvas」的帧，多图层直接退回拷贝（日志 `several layers are composed`）。
