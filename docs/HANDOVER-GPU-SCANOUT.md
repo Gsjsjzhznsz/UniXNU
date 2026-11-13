@@ -103,6 +103,31 @@ SWEET GPU: wait timed out: CP RPTR 4752 WPTR 5320 SQE_CNTL 0x1 ... HW_FAULT 0 CP
 `WPTR 5320 - RPTR 4752 = 568` dword 卡住，`HW_FAULT 0`、`CP_IRQ 0` —— 是**卡住**而不是报错。
 后果仍然是黑块（没画完的帧被扫到）与卡顿（客户端 `waitFence` 只能等超时）。
 
+### 决定性证据：帧数据本身没有黑块（2026-11-13）
+
+用内置截图抓 DPU 正在扫描的那块内存（`kern.sweet_fb_shot`，`sweet_fb_shot_copy()` 读的是
+`sweet_surface_copy(fShotId)` 的 `kernelAddress() + offset`，也就是 DPU 实际取数的那块 IOSurface，
+不是我们自己的画布）：
+
+```
+375x812 (= 1125/3 x 2436/3)，dark=0 (0.0%)
+```
+
+**帧数据是干净的，屏幕上却有黑块**，所以伪影产生在「DPU 取数 → 面板」之间，不在合成/拷贝里。
+这把范围收到三种可能，按可能性排序：
+
+1. **扫描用的 IOVA 槽位在 DPU 还没读完时就被改映射了。** `scanoutIova()` 只保护
+   「surface 仍在 `fZcHeld[]` 里」的槽位；一旦 `zcPoll()` 释放了它，槽位立刻可以被新 surface
+   复用（`sweet_scanout_unmap()` + 重映射）。DPU 若仍在本帧内读那个 IOVA，就会读到**别的
+   surface 的物理页**——内容可能正好是空的，表现为闪现的黑矩形。这完全解释「帧数据干净但屏幕有黑块」。
+   修法：槽位退休要以**下一次 latch** 为准，而不是以 hold 释放为准；至少把最近两次提交用过的
+   槽位钉住（4 个槽位里留 2 个），或在 unmap 前确认该槽位已不是当前 `fLastFlush` 的目标。
+2. DPU/DSI 侧的 underrun（command mode + tear check 时序）。
+3. 面板自刷新把旧内容顶出来。
+
+下一步优先验证 1：它是唯一能同时解释「黑块闪现」「帧率正常」「帧数据干净」三项的机制，
+而且改动局限在 `scanoutIova()` 的槽位复用条件，不需要动 GPU 或 DSI。
+
 **可疑点：IB 地址没有范围校验。** `sweet_gpu_submit()` 把客户端给的 IOVA 直接写成环形缓冲里的
 两个 dword：
 
