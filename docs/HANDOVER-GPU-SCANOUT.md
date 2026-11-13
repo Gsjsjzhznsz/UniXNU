@@ -65,6 +65,21 @@ gpu_hold_timeouts=18
    观感是延迟而不是帧率——所以计数器显示 55–60 fps，手却觉得卡。
 2. **黑块**：GPU 没画完就交帧，被扫描的那块内存还是空的/旧的，表现为黑色矩形。
 
+**已排除：不是 GPU 频率档位不够，而是 boost 上限设太低。**
+
+| 引导参数 | 实际档位 | 黑块 |
+|---|---|---|
+| `sweetgpufreq=g`（默认） | boost 只到 3 = 427 MHz | 有 |
+| `sweetgpufreq=5` | **落到 level 1 = 257 MHz**（数字参数并未锁到 N） | **明显更多** |
+| `sweetgpufreq=g sweetgpuboost=5` | 可到 5 = **585 MHz** | 待用户确认 |
+
+`a630_boost_level` 默认 3（`0188`），所以调速器再忙也只抬到 427 MHz。把它抬到 5 后
+`kern.sweet_gpu` 能看到 `level=5 mhz=585`，且同一窗口内 `gpu_hold_timeouts` 不再增长
+（4 → 4），`submits_100ms` 增长变慢（3 → 1）。
+
+注意 `sweetgpufreq=N`（数字）**不生效**：解析里设了 `a630_level`，但固定模式随后又回到最低档，
+实测 `=5` 得到 257 MHz，比调速器还差。要用 `sweetgpuboost=N` 配 `sweetgpufreq=g`。
+
 所以下一步不该继续调显示，而应该查 GPU 环形缓冲的停滞：
 `sweet_a630.c` 的提交/完成推进、`sweet_gpu_fence_snapshot()` 的粒度（全局 vs 每帧）、
 以及 `0229` 门控是否在等一个不相干的 GPU 工作。
