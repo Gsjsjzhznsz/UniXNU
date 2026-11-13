@@ -33,8 +33,6 @@ static int rd_last_error;
 static uint32_t rd_version, rd_status, rd_fifo_status, rd_dma_ctrl;
 static uint32_t rd_last_level;
 static unsigned rd_writes;
-static char rd_text[RAPHAEL_DSI_TEXT_MAX] =
-    "raphael_dsi v1 mode=off armed=0 writes=0\n";
 
 static bool
 rd_enter(void)
@@ -277,7 +275,7 @@ raphael_dcs_level_sysctl SYSCTL_HANDLER_ARGS
 	int level = 0;
 	int error;
 
-	if (req->newptr == NULL) {
+	if (req->newptr == 0) {
 		return EINVAL;
 	}
 	error = sysctl_handle_int(oidp, &level, 0, req);
