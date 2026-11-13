@@ -1,27 +1,36 @@
 # GPU 直扫交接文档（raphael / SM8150 / Adreno 640 / iOS 18.7.8）
 
 > 目标：iOS 的合成结果由 DPU **直接扫描**，CPU 不再拷贝 10.9 MB/帧。
-> 结论：**已跑通**，实测 ~23–30 fps、`copy_frames=2`（仅启动初期两帧）。剩余瓶颈见 §7。
+> 结论：**直扫已跑通（单 VIG0）**，`copy_frames` 停在启动初期。**60 fps 与亮度都还没达标**，
+> 双 pipe 乒乓已写但默认关闭。未解决项见 §7。
 
 ---
 
-## 0. 一句话现状
+## 0. 一句话现状（2026-11-13 更新）
 
-CoreAnimation 交出的 IOSurface 通过显示流自己的 stage-1 页表被 VIG0 直接读取，QSEED3 做
-`1125x2436 → 1080x2340`，每帧 CPU 只做 20 来次 MMIO 写。**`swaps_s` 从 0.07 提升到 22.7–31**，
-`copy_frames` 停在 2。还差的：背光/唤醒手感、latch 延迟、多图层（动态岛）。
+CoreAnimation 交出的 IOSurface 通过显示流自己的 stage-1 页表被 **VIG0** 直接读取，QSEED3 做
+`1125x2436 → 1080x2340`，每帧 CPU 只做 20 来次 MMIO 写。
 
-最后一轮实测（内核 `66b36a2`，2026-11-12）：
+- **已确认可用**：`mode=direct`、`copy_frames` 不随运行增长（累计 3–4，全在启动初期）、
+  GPU `submitted == completed`、`hangs=0`。滑动窗口实测 `swaps_s` 到过 **41.5–52.4**，
+  静态锁屏时是 0–10（用户态本来就不出帧）。
+- **未达标**：目标 60 fps；`coalesced` 在同一窗口还有 ~10/s，说明到达 submit 的帧被合并；
+  亮度/唤醒未解决（见 §7 P0，已确认走 DCS 而不是 WLED）。
+- **不可用**：`0272` 双 VIG 乒乓——`sweet_scanout.c` 里 `sc.pp` 已强制 `false`，原因见 §7 P1。
+
+最近一次上机实测（内核 `f54a0a3`，2026-11-12，滑动中）：
 
 ```
-mode=direct hz=59 hw=0 flip=0 smmu=untested
-up_s=1047  swaps=894  swaps_s=22.71  copy_frames=2
-pace win=1008ms swaps=31 copy=0 zc=0 gpu_holds=15606 hold_to=12 latch_us=1623225
-scanout maps surface 199 @ iova 0x80000000
-scanout maps surface 205 @ iova 0x81000000
-scanout maps surface 208 @ iova 0x82000000
-scanout maps surface 220 @ iova 0x83000000
+mode=direct hz=59 up_s=2333 win_ms=1010
+swaps=4030 swaps_s=41.54 coalesced=90 coalesced_s=9.89
+copy_frames=3 latch_waits=42 vsync_s=58.36 swapsync=0
+gpu submitted=22945 completed=22945 hangs=0
 ```
+
+最近一次构建（内核 `b7908b3`，2026-11-13，**未上机**）：CI `43332422963` success，
+`errors.txt` 空，镜像已打好：
+`ios16-reference/validation-20261112/b7908b3/boot-b7908b3.img`
+（sha256 `158893890687b293df52cb5889f7b0d06cd1586bebca356098e7baaaa726865d`）。
 
 ---
 
@@ -64,7 +73,12 @@ scanout maps surface 220 @ iova 0x83000000
 | `0269-sweet-fb-swapwait-nolatch.patch` | `swapWaitInner()`：`fLastFlush==0`（没有任何帧交给 MDP）直接算完成，避免冻屏 |
 | `0270-sweet-fb-scanout-perf-and-off.patch` | ① GPU 帧不再做 10.9 MB 缓存清理；② 熄屏时先把管道切回面板内存，切成功才释放 surface hold |
 | `0271-sweet-fb-swapwait-at-submit.patch` | ① scanout 模式下 SwapWait 提交即答复（省 9.9 ms/帧）；② `sc_flush_idle` 最多等 2 ms，pending flush 由新写入覆盖（省 16.2 ms/帧） |
+| `0275-scanout-retire-before-submit.patch` | **本文件当前唯一在用的性能修复**：提交前退休已 latch 帧 + 容量预检（去掉 25 ms work-loop 忙等）；映射/清 cache 前 hold surface，失败撤销 |
+| `0272`（在 `sweet_scanout.c` 内，**默认关闭**） | VIG0/VIG1 乒乓骨架，`sc.pp = false`，见 §7 P1 |
 | `0137-beryllium-reboot-mode.patch`（改动） | 把 reboot-to-bootloader 开放到 raphael（PM8150 PON spare + IMEM + PSCI fallback），用于自愈循环 |
+
+> **已删除**：`0273-raphael-pm8150l-wled-read.patch`。它给 raphael 开 SID 5 的 WLED 读白名单，
+> 但亮度实际走 DSI DCS（§7 P0），写了也点不亮，且会把后来人引到错误方向。
 
 ### 工具 / 资料
 
@@ -175,12 +189,35 @@ ssh ... 'sysctl -w kern.sweet_reboot_mode=bootloader; /var/jb/usr/sbin/reboot'
 
 ### P0 背光与唤醒（用户最直接的手感问题）
 现象：熄屏要按好几次电源；`SWEET FB: backlight fade: cannot read WLED string 0 brightness; pixel fallback`。
-原因：`0126` 的 WLED 代码是 beryllium（PMI8998）的 `SID 3 / 0xd900`；raphael 的背光在
-**PM8150L**，SID/基址不同。已用 `kern.sweet_spmi_addr` + `kern.sweet_spmi_dump` 在真机探测
-`0xd957`（亮度）/`0xd846`（MOD_EN）的 SID 0–3，全部读失败（`--`），但 SID 2 @`0x4000` 能读
-（说明探测路径本身可用）。**下一步**：从 raphael 的 downstream DTS / 内核源码确认 PM8150L 的
-usid 与 `wled@d800` 基址，然后给 `sweet_scanout` 或 `0126` 加 raphael 分支。
-背光一旦可用，熄屏可以平滑降亮，不必走 `memset` 兜底，唤醒手感也会正常。
+
+**结论已改（2026-11-13）：raphael 的 AMOLED 亮度不走 WLED，走 DSI DCS。** 依据（Xiaomi
+`raphael-p-oss`，固定 SHA `663db50e`）：
+
+| 证据 | 内容 |
+|---|---|
+| `xiaomi-sm8150-common.dtsi:329-337` | 面板 `bl_ctrl_dcs`，`min 2 / max 2047` |
+| `dsi-panel-ss-fhd-ea8076-cmd.dtsi` | `qcom,mdss-dsi-bl-dcs-type-ss`（Samsung 高字节在前），cmd mode，1080x2340 |
+| `dsi_panel.c:746-755` | `dsi_panel_set_backlight()` 按面板 `bl_config.type` 选 WLED **或** DCS；DCS 面板永不进 WLED 分支 |
+| mainline `panel-samsung-ams639rq08.c` | DCS `0x51` 写亮度（2 字节，高字节先），`0x52` 回读，max 2047，init 1023 |
+
+PM8150L 的 `wled@d800`（usid 5）**确实存在且被 raphael 板级 DTS 打开**（`raphael-sm8150.dtsi:743-747`，
+`status="ok"`、`string-cfg=15`），但节点存在/使能与「这块 AMOLED 的亮度传输」不是一回事——
+不能用它当亮度通路。
+
+**已回退的错误改动**：`0273`（给 raphael 开 SID 5 WLED 读）已删除，`0126` 的
+`sp_write_allowed` / `SWEET_WLED_SID` 也回到 beryllium-only。原因是加 SID 5 只能让
+`blInit()` 读到寄存器，写路径仍被 beryllium 条件挡住，`fBlOK` 还是 false，对亮度零作用。
+
+**下一步**：按 DCS 实现亮度。SM8150 DSI0 = `0x0ae94000`/`0x400`，下游 `compatible` 是
+`qcom,dsi-ctrl-hw-v2.3`，对应 `dsi_ctrl_hw_cmn_kickoff_fifo_command`（无需 cmd-DMA 分配）。
+包头按下游 `dsi_ctrl.c`：长写 DT `0x39`、word count 3、`last` bit7、payload 补 `0xFF`；
+`0x51` 的 payload 是 `51 hi lo`。**先只读**：确认 controller idle/clock/ownership，再串行发
+一次小幅亮度写并用 `0x52` 回读。不要在缺少 power/ownership 的情况下裸读 MMIO——
+无时钟时 load 可能 stall 或 abort。
+
+> 已试过并撤回：一个默认关闭、`kern.raphael_dsi_request=1` 触发 `ml_io_map` 的只读探针
+> （`raphael_dsi.c` / `0274` / `0276`）。代码本身能编译，但请求路径等于让 root 直接对
+> 未声明 ownership 的 DSI 发 MMIO load，且无任何硬件证据它能安全返回，故未入库。
 
 ### P1 串行等待（"拷贝已去掉但还是卡"的真因）
 实测每帧平均：**latch 等待 16.2 ms + SwapWait 9.9 ms**（`pace` 行 `latch_us=1623225`、
@@ -191,24 +228,68 @@ usid 与 `wled@d800` 基址，然后给 `sweet_scanout` 或 `0126` 加 raphael �
    所以每个 swap 都要等上一帧被面板吸收（一个 60 Hz 帧 = 16.2 ms）。
 2. `swapWaitInner()`：每 swap 再等 1.5 帧（9.9 ms）。
 
-**已在 0271 落地（`8a61ab3`，待有动画的界面下复测数字）**：
+**已在 0271 落地（`8a61ab3`）**：
 - `fSwapSync` 在 scanout 模式默认关（`sweetfb_swapsync=1` 仍可开）：surface 已 hold 到后面的帧
   latch，CA 改不了它，提交即答复 → 省 9.9 ms。
 - `sc_flush_idle` 改成最多 2 ms，pending flush 被下一次写入覆盖，计入 `sc.replaced` → 省 16.2 ms。
 
-**剩下的一条（0272 已由并行会话落地，`1944d59`，待复测）**：
-- 双 SSPP 乒乓（VIG0/VIG1 轮流）：写 A 时 B 还在扫，彻底消掉那 2 ms 与单管串行。
-  注意两条 pipe 的 CTL flush 位不同（VIG0=bit0、VIG1=bit1），QSEED3 要各自编程，LM0 blend
-  两条都要使能。
+**已在 0275 落地（`b7908b3`）——这条是真正卡顿的可疑来源**：
+旧顺序是「先 `sweet_scanout_show()` 写新 flush，再 `zcPoll()`」。问题是新 flush 一写下去，
+pending 位重新置起，`latchedNow()` 立刻变 false，于是上一帧其实早已 latch 的事实被自己挡住，
+退休永远晚一拍；hold 攒到 4 个就进 `waitLatch()` 忙等最多 25 ms，而这发生在 work loop 上，
+把 vsync、early present、zcPoll 一起卡住。0275 改成：
+
+1. **提交前**先 `zcPoll()` 退休已 latch 的帧，再查 `fZcCount >= 4`，满了直接 decline（走 CPU 拷贝回退），
+   不再同步等一整帧；
+2. **映射/清 cache 之前**就 `sweet_hold(s, true)`，保证 CA 在映射和 `sweet_dma_sync_va` 期间
+   不能复用这个 surface；IOVA 映射失败或 `show()` 在编程/触发之前拒绝时，`sweet_hold(s, false)` 撤销。
+
+`show()` 的非 0 返回全部发生在写 `SRC0`/`CTL_FLUSH` 之前，所以「拒绝时没有 MMIO 拥有这个引用」成立——
+这条不变量是 0275 提前释放的依据，改 `show()` 时必须保持。
+
+**0271 的测量盲点（还没修）**：`zcPresent()` 的 scanout 分支提前 `return true`，绕过了
+`fSt.zc`/`zcAbs`/`fZcFrames` 和 `scanAddr()` 的 `tr->scan`，所以 `zc_s`、`zc_us`、
+`scan_replaced`、trace 的 `scan_us` 都**不反映直扫**；`fSwapScanID` 只代表「已提交 flush」，
+真正的 latch 观察在 `zcPoll()` 的 `fSwapDone`。要判断 0275 的收益，看
+`swaps_s`（同场景滑动）、`coalesced`、以及日志里 `MDP flush ... did not latch within 25 ms`
+是否消失，不要看 `zc_s`。
+
+**剩下的一条：双 SSPP 乒乓已实现但默认关闭（`b7908b3`）**
+`1944d59`/`d6156fa`/`f54a0a3` 落地了 0272，但**上机不可用**，`sweet_scanout.c` 里
+`sc.pp` 已强制为 `false`。三个独立缺陷，缺一不可开工：
+
+1. **VIG1 的取数配置从未初始化**。`show()` 只写 `SRC0_ADDR/YSTRIDE/SRC_SIZE/XY/OUT_*` 和
+   QSEED，从不写 `SRC_FORMAT (+0x30)`、`UNPACK_PATTERN (+0x34)`、`SRC_OP_MODE (+0x38)`。
+   VIG0 继承 ABL 的工作配置，VIG1 没有这个保证；`SC_SAVED_SSPP` 里也没有这三个。
+   探测到 `QSEED3 HW_VERSION=0x1004` 只证明「这是个 VIG」，不证明它能取数。
+2. **LM `CONST_ALPHA` 的打包方向写反了**。Linux `dpu_hw_lm.c`
+   （`setup_blend_config_combined_alpha`）是 `const_alpha = (bg & 0xff) | ((fg & 0xff) << 16)`，
+   即 fg 在高 16 位。原代码 `VIG1_ON = 0x000000ff` 实际是 fg=0/bg=255。
+   `b7908b3` 已修正常量与注释，但在 `pp=false` 下是死代码，重开时必须实测。
+3. **surface hold 模型按单 pipe 设计**。`zcPoll()` 在一帧 latch 后释放除最新之外的全部 hold，
+   而双 pipe 会同时持有两个 surface。释放后 CA 可重绘，甚至映射槽会被回收 → 残留旧帧或 SMMU fault。
+   要重开必须改成「每 pipe 各自持有 current/queued，直到该 pipe 被替换且 flush 确认退休」。
+
+视觉症状正好对应：屏幕极暗、`display on` 后立刻 `display off`、触控看起来没反应。
 
 **测量提醒**：`latch_us` / `swap_wait_us` 只在有帧提交时才有数。实测那几轮锁屏是静态的
 （`swaps` 几十次/分钟），抓 170 s 可能一个 swap 都没有。要测延迟，必须先让界面动起来
 （滑动、开 app、或切到动态壁纸），否则日志里全是 0。
 
 ### P2 多图层（动态岛 / 状态栏叠加）
-现在只接受「单图层、整 canvas」的帧，多图层直接退回拷贝（日志 `several layers are composed`）。
-**下一步**：第二个 SSPP（VIG1）或 multirect + LM blend；参考 andromeda 0207 的单层限制，以及
-本仓 `0211/0213` 的 HUD 图层做法。
+现在只接受「单图层、整 canvas」的帧：`zcPresent()` 遇到多个置位图层直接
+`zcDecline(1, "several layers are composed by the copy path")` 退回 CPU 拷贝。
+
+**注意这和「动态岛」不是同一件事**：
+- 动态岛的 UI 是 SpringBoard 用 MobileGestalt 的 `DeviceSupportsDynamicIsland` 决定画不画的，
+  与 DPU 图层数无关；打开它只需要改 MobileGestalt 缓存（`tools/raphael/dynamic-island.sh on`），
+  不需要改 scanout。
+- 真正的 P2 是**硬件合成多图层**：要多一个 SSPP（VIG1）+ LM blend stage，或走 multirect。
+  它和 §7 P1 的双 pipe 是同一批前置条件（VIG1 取数配置、`CONST_ALPHA`、每 pipe 独立 hold），
+  所以**必须先把 P1 那三条修完**，否则就是在放不安全的双 pipe 上再叠一层。
+
+参考：andromeda `0207` 也是单层限制；本仓 `0211/0213` 有 HUD 图层的 blend stage 做法
+（`SWEET_MDP_LM_BLEND0 0x20`、`BLEND_STRIDE 0x18`、FG_ALPHA/BG_ALPHA/OP `0x602`）。
 
 ### P3 映射槽与内存回收
 `fScanoutMaps[]` 只做 LRU 淘汰、不做超时回收；熄屏 `zcReleaseAll()` 后映射仍在（最多 4 个
@@ -222,7 +303,24 @@ usid 与 `wled@d800` 基址，然后给 `sweet_scanout` 或 `0126` 加 raphael �
 
 ---
 
-## 8. 补丁自检脚本（每次改补丁必跑）
+## 8. 补丁自检（每次改补丁必跑）
+
+**两件事都要做，缺一不可**：hunk 计数正确 ≠ 补丁能应用。`b7908b3` 之前那次 CI 失败
+（`f9360bc`，run `43243143613`）就是 hunk 计数全绿、但 `bsd/dev/sweet_spmi.c:96` 的上下文
+文本经 0262 之后已经变了，`git apply` 直接拒绝，fatal hook 让构建 4 分钟就退出。
+
+### 8.1 真应用（首选，能抓上下文冲突）
+
+```sh
+python3 tools/raphael/check-patch-series.py              # 默认查 sweet_spmi.c + SweetFramebuffer.cpp
+python3 tools/raphael/check-patch-series.py --only bsd/conf/files
+python3 tools/raphael/check-patch-series.py --only iokit/Kernel/arm/SweetFramebuffer.cpp --through 275
+```
+
+它在临时目录 `git init`，从最早的 `new-file` diff 重建目标文件，再按文件名顺序逐个
+`git apply`。任何一次真实拒绝就非零退出。`--check-hunks-only` 只验计数，**不要**用它替代真应用。
+
+### 8.2 hunk 计数
 
 ```python
 import re, glob
@@ -255,19 +353,25 @@ print('mismatched hunks:', bad)
 
 | 来源 | 看什么 |
 |---|---|
-| **giannoccarol/UniXNU-andromeda** | `xnu/andromeda_scanout.c`（**同 SoC 实测算通**，29.6–30.4 fps）、`andromeda_ctl.c`（只读 DPU 探针 `andctl dpu`）、patch `0201/0202/0205/0207/0208`（fence、异步 present、每 swap fence、扫描、surface cache） |
+| **MiCode/Xiaomi_Kernel_OpenSource** `raphael-p-oss` @ `663db50e195a8a54c8565ac4ab0c6d9ba7d80db0` | 亮度唯一权威：`xiaomi-sm8150-common.dtsi:329-337`（`bl_ctrl_dcs` 2..2047）、`dsi-panel-ss-fhd-ea8076-cmd.dtsi`（`bl-dcs-type-ss`）、`dsi_panel.c:746-755`（WLED/DCS 选择）、`dsi_ctrl_hw_cmn.c:705`（v2.3 FIFO 发包）、`dsi_ctrl.c:942-983,1161-1178`（包头/padding/last） |
+| **Linux** `drivers/gpu/drm/panel/panel-samsung-ams639rq08.c` | DCS `0x51`/`0x52` 用法、max 2047 / init 1023、亮度前后临时退 LPM |
+| **Linux** `drivers/gpu/drm/msm/disp/dpu1/dpu_hw_lm.c` | `setup_blend_config_combined_alpha`：`const_alpha = (bg&0xff) \| ((fg&0xff)<<16)` —— 双 pipe 重开时必须按这个校验 |
+| **Linux** `dpu_hw_sspp.c` / `catalog/dpu_5_0_sm8150.h` | VIG 取数配置（`SRC_FORMAT`/`UNPACK`/`OP_MODE`）、VIG0 `0x4000`→本板 `+0x1000`、VIG1 `0x6000`→`0x7000`、LM0 `0x44000`→`0x45000` |
+| **giannoccarol/UniXNU-andromeda** | `xnu/andromeda_scanout.c`（**同 SoC 实测算通**，29.6–30.4 fps）、`andromeda_ctl.c`（只读 DPU 探针 `andctl dpu`）、patch `0201/0202/0205/0207/0208` |
 | **UniXNU/GopFramebuffer** | `NativeLegacyDisplay.cpp`：`dpu-scanout=2`、GPU fence 等待（200 µs 重试 / 250 ms 慢等待）、`fb-gpu=1` hand-off |
 | **UniXNU/Adreno740** | scanout 内存类型 `0x5343`、`fenceProgress()` 前缀、device memory 跳过 cache 维护、持久化 import |
 | **UniXNU-sheng** | `porting.toml` 里 `dpu-scanout` 的 apps-SMMU stage-1 做法与实测结论 |
 | 本仓 `docs/FORK-SCAN-AND-BUGS.md` | 13 个机型 fork 的横向对比 + 本仓显示路径的 bug 清单（B1–B7） |
+| `ios16-reference/display-research-20261112/RESEARCH.md` | 上述 DCS 结论的完整取证：18 份参考文件 + SHA256 清单 + 未验证项 |
 
 ---
 
 ## 10. 文件索引
 
-- 补丁：`xnu/patches-11215/0268-sweet-fb-gpu-scanout.patch`、`0269-sweet-fb-swapwait-nolatch.patch`、`0270-sweet-fb-scanout-perf-and-off.patch`、`0137-beryllium-reboot-mode.patch`
+- 补丁：`xnu/patches-11215/0268/0269/0270/0271/0275-*.patch`、`0137-beryllium-reboot-mode.patch`
 - 源码：`xnu/patches-11215/sweet_scanout.c`、`sweet_scanout.h`、`0268-stage-sweet-scanout.sh`
-- 工具：`tools/raphael/capfast.py`、`raphael-base.adt`、`pack-mdp-tests.sh`、`mkboot-raphael.sh`
-- 镜像：`ios16-reference/ios18-image/boot-ios18-scanout.img`（70,623,232 B，manifest 475 B）
+- 工具：`tools/raphael/check-patch-series.py`（改补丁后必跑）、`capfast.py`、`raphael-base.adt`、`pack-mdp-tests.sh`、`mkboot-raphael.sh`
+- 镜像：`ios16-reference/validation-20261112/b7908b3/boot-b7908b3.img`（当前最新，未上机）；`ios16-reference/ios18-image/boot-ios18-scanout.img`（旧）
+- 基线：`ios16-reference/validation-20261112/boot-0271-recovery.img`（0271 单管，已上机验证可显示）
 - 文档：`docs/FORK-SCAN-AND-BUGS.md`、`docs/HANDOVER-GPU-SCANOUT.md`（本文）
 - CI：`.github/workflows/xnu.yml`
