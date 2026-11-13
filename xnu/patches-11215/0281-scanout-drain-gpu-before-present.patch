@@ -1,0 +1,37 @@
+fb: drain the GPU to now before the panel reads a frame (0281)
+
+The 0229 gate fences the GPU work submitted before the swap arrived. A
+compositor that commits its draws after the swap is not covered by that fence,
+so the frame can reach the panel with a region still undrawn -- cleared black --
+and because the region belongs to the content, the black block moves with the
+picture while scrolling. gpu_drops does not see these: the old fence did pass.
+
+Take a fresh fence immediately before handing the frame over and wait for it,
+bounded at ~16 ms so a stuck GPU cannot stop the display. This makes "the
+picture is complete" a property of the moment of submission instead of the
+moment the swap arrived.
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -2460,6 +2460,21 @@
+ 	f.dst_y = (uint32_t)(fPadY < 0 ? 0 : fPadY);
+ 	f.dst_w = dstW;
+ 	f.dst_h = dstH;
++	/*
++	 * 0281: the panel reads this surface directly, so every draw into it must have finished. The
++	 * 0229 gate fences only the work submitted before the swap arrived; a compositor that commits
++	 * its draws later in the frame is not covered by that fence, and the still-undrawn region shows
++	 * up as a black block that moves with the content. Drain the GPU to "now" before handing the
++	 * frame over. Bounded at ~16 ms so a stuck GPU cannot stop the display.
++	 */
++	{
++		const uint32_t fenceNow = sweet_gpu_fence_snapshot();
++		if (fenceNow != 0) {
++			for (unsigned i = 0; i < 800 && !sweet_gpu_fence_passed(fenceNow); i++) {
++				IODelay(20);
++			}
++		}
++	}
+ 	/* A nonzero result is returned only before show programs or triggers the pipe. */
+ 	if (sweet_scanout_show(&f) != 0) {
+ 		sweet_hold(s, false);
