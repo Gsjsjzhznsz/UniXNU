@@ -1,14 +1,18 @@
-gpu: report an indirect-buffer address outside the GPU window (0278)
+gpu: report indirect buffers with a bad address or length (0278)
 
-The CP will fetch an indirect buffer from whatever address the two dwords in
-the ring carry, and a bad one stalls submission instead of failing, which shows
-up as "CP RPTR ... WPTR ... rem 0" plus client fence timeouts. raphael's GPU VA
-window is [GVM_BASE, GVM_END) = [0x80000000, 0x100000000), so any IB address
-outside it, or not page aligned, is a caller bug worth naming.
+sweet_gpu_submit() puts each client IB into the ring unchecked: the address as
+two dwords and the length as a third. A bad address makes the CP fetch from
+nowhere; a zero or absurd length makes it walk off the end of a valid buffer and
+read whatever follows as packets. Both stall submission with HW_FAULT clear,
+which is exactly the shape of the stall we see ('CP RPTR ... WPTR ... rem 0'
+plus client fence timeouts), and neither leaves a fault bit behind.
 
-This only reports: each distinct bad address is printed once with its seqno and
-the submission still goes ahead exactly as before, so the run behaves the same
-while the log says which address is wrong.
+Report each distinct (address, length) pair once with its seqno, and still
+submit exactly as before, so a run behaves identically while the log names the
+bad input.
+
+raphael's GPU window is [GVM_BASE, GVM_END) = [0x80000000, 0x100000000); the
+length limit is a generous 1M dwords (4 MiB).
 
 Note for the next reader: SMMU CB1 FSR 0x400 with FAR 0x12de541f4ff28 is a
 stale status bit from boot that sweet_gpu_submit() already clears; it is not a
@@ -16,27 +20,33 @@ runtime fault and must not be read as the cause of a stall.
 
 --- a/bsd/dev/sweet_a630.c
 +++ b/bsd/dev/sweet_a630.c
-@@ -3920,6 +3920,26 @@
+@@ -3920,6 +3920,32 @@
  	if (!sweet_gpu_ready() || count == 0 || count > 128) {
  		return 0;
  	}
 +	/*
-+	 * 0278: the CP fetches an indirect buffer from whatever address the two dwords below carry, and
-+	 * a bad one hangs submission instead of failing. raphael's GPU window is [GVM_BASE, GVM_END).
-+	 * Report a distinct out-of-window or unaligned address once, and still submit: this only adds
-+	 * diagnosis, it does not change behaviour.
++	 * 0278: both the address and the length of an indirect buffer reach the CP unchecked. A bad
++	 * address makes it fetch from nowhere; a zero or absurd length makes it walk off the end and
++	 * read whatever follows as packets. Either one stalls submission with HW_FAULT clear, which is
++	 * what the stall reports look like. Report each distinct value once and still submit: this only
++	 * adds diagnosis.
 +	 */
 +	{
 +		static uint64_t bad_ib_seen;
 +		for (unsigned i = 0; i < count; i++) {
 +			const uint64_t va = ib_iova[i];
-+			if (va >= GVM_BASE && va < GVM_END && (va & 0xfff) == 0) {
++			const uint32_t dw = ib_dwords[i];
++			const bool addr_ok = va >= GVM_BASE && va < GVM_END && (va & 0xfff) == 0;
++			const bool len_ok = dw != 0 && dw <= (1u << 20);
++			if (addr_ok && len_ok) {
 +				continue;
 +			}
-+			if (__atomic_exchange_n(&bad_ib_seen, va, __ATOMIC_ACQ_REL) != va) {
-+				printf("SWEET GPU: IB %u of %u at 0x%llx is outside the GPU window [0x%llx,0x%llx) or not page aligned (seqno %u)\n",
-+				    i, count, (unsigned long long)va, (unsigned long long)GVM_BASE,
-+				    (unsigned long long)GVM_END, a630_dev.seqno);
++			const uint64_t key = va ^ ((uint64_t)dw << 56);
++			if (__atomic_exchange_n(&bad_ib_seen, key, __ATOMIC_ACQ_REL) != key) {
++				printf("SWEET GPU: IB %u of %u addr 0x%llx len %u dw (window [0x%llx,0x%llx), limit 1M dw) seqno %u: address %s, length %s\n",
++				    i, count, (unsigned long long)va, dw,
++				    (unsigned long long)GVM_BASE, (unsigned long long)GVM_END,
++				    a630_dev.seqno, addr_ok ? "ok" : "BAD", len_ok ? "ok" : "BAD");
 +			}
 +		}
 +	}
