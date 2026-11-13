@@ -274,7 +274,35 @@ PM8150L 的 `wled@d800`（usid 5）**确实存在且被 raphael 板级 DTS 打�
 - 包头打包器已 host 测试：对 0/1/2/0xff/0x100/0x123/0x3ff/0x7fe/0x7ff 与下游算法逐字节一致，
   2048 与空指针被拒。
 
-**未上机验证**。测试顺序（手机在 fastboot 时）：
+**已上机验证（2026-11-13，内核 `3ca6b55` + `raphael_dcs=1`）**
+
+读回来的寄存器（`kern.raphael_dsi`）：
+
+```
+hw_version=0x20030000   -> major 2, minor 3：寄存器独立印证了 DT 的 v2.3
+status=0x00000005       -> bit2 置位 = command-mode MDP 正在推帧
+fifo_status=0x00001010
+dma_ctrl=0x14000000     -> BIT(28) EMBEDDED + BIT(26) LPM，硬件本来就是这个模式
+```
+
+写入结果：
+
+```
+sysctl -w kern.raphael_dcs_level=2047
+  -> writes=1 last_level=2047 last_error=0
+     status 0x05 -> 0x00（不再忙），fifo_status 0x00001010 -> 0x11111010
+sysctl -w kern.raphael_dcs_level=120
+  -> writes=2 last_level=120 last_error=0
+```
+
+写入后显示继续正常扫描（`swaps` 834→872、`scanout_latched` 692→718 持续增长），
+没有 panic、没有 SMC/DSI 错误、没有丢帧。**即 DCS 0x51 到达了控制器且被接受。**
+
+待确认：面板亮度是否真的跟着变（需要肉眼确认，见下）。若面板忽略该包，
+最可能的原因是 `0x51` 在 `dsi_panel` 侧要求先退出 LPM/进入 HS，或需要
+`dsi_ctrl` 的命令状态机而不是裸 FIFO。
+
+**测试顺序**（手机在 fastboot 时）：
 1. `kern.sweet_fb` 先确认 `mode=direct`、有画面（DSI 必须在被驱动状态）；
 2. 读 `kern.raphael_dsi` 记录 `status`/`hw_version`（控制器不提供可信版本号，
    下游是从 DT compatible 选 v2.3，所以版本只作记录）；
