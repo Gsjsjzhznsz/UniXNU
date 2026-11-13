@@ -419,6 +419,35 @@ sc_tlb_flush(void)
  * near-latch case; a replaced frame is counted instead of blocking. Always true: the caller has
  * nothing better to fall back to.
  */
+/*
+ * Diagnostic: submit only every Nth frame, so the panel updates at 1/N of the rate while the last
+ * frame stays in its own memory. sweetfb_scanperiod=1 (default) keeps every frame.
+ *
+ * Why: one 1080x2340x4 frame is 10.11 MB, so 60 Hz needs 607 MB/s. That is at or past the ceiling
+ * of a 4-lane 1.5 Gbps link (59.4 Hz) and well past 1.2 Gbps (47.5 Hz). If the panel cannot take a
+ * whole frame per refresh it must show the previous one for part of it, which looks like a
+ * horizontal seam that moves down the screen. Skipping frames removes the pressure; if the seam
+ * goes away with sweetfb_scanperiod=2, the link is the limit and the fix is compression/format,
+ * not scheduling.
+ */
+static uint32_t sc_period = 1;
+static uint32_t sc_tick;
+
+static void
+sc_period_init(void)
+{
+	static unsigned once;
+
+	if (__atomic_exchange_n(&once, 1u, __ATOMIC_ACQ_REL) != 0) {
+		return;
+	}
+	uint32_t n = 1;
+	if (PE_parse_boot_argn("sweetfb_scanperiod", &n, sizeof(n)) && n >= 1 && n <= 8) {
+		__atomic_store_n(&sc_period, n, __ATOMIC_RELEASE);
+		printf(SC_TAG " scan period %u: submitting every %uth frame (diagnostic)\n", n, n);
+	}
+}
+
 static bool
 sc_flush_idle(uint32_t bits)
 {
@@ -767,6 +796,14 @@ sweet_scanout_show(const struct sweet_scan_frame *f)
 	struct sc_regs r;
 	if (!sweet_scanout_ready()) {
 		return ENODEV;
+	}
+	sc_period_init();
+	if (__atomic_load_n(&sc_period, __ATOMIC_ACQUIRE) > 1) {
+		const uint32_t n = __atomic_load_n(&sc_period, __ATOMIC_ACQUIRE);
+		if ((__atomic_add_fetch(&sc_tick, 1u, __ATOMIC_RELAXED) % n) != 1) {
+			/* Leave the pipe alone: the panel keeps the frame it already has, no DSI traffic. */
+			return 0;
+		}
 	}
 	if (f == NULL || !sc_frame_regs(f, sc.qseed_version, &r)) {
 		return EINVAL;
