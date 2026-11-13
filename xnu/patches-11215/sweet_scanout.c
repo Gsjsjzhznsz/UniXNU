@@ -127,6 +127,12 @@ extern void IOSleep(unsigned int milliseconds);
 #define IF_TEAR_CHECK_EN  0x284u
 #define IF_TEAR_LINE      0x2b0u
 #define IF_AUTOREFRESH    0x2b4u
+#define IF_TEAR_CTRL      0x288u
+#define IF_TEAR_START_POS 0x2a0u
+#define IF_TEAR_RD_PTR_IRQ 0x2a4u
+#define IF_AUTOREFRESH_BIT (1u << 31)
+#define IF_TEAR_EXT_TE     (1u << 20)
+#define SC_PANEL_VHEIGHT   2340u
 
 /* apps SMMU (DT apps_smmu reg) and the display's stream (DT iommus <&apps_smmu 0x800 0x420>) */
 #define SC_SMMU_PA        0x15000000u
@@ -448,6 +454,69 @@ sc_period_init(void)
 	}
 }
 
+static bool sc_tearwait;
+static bool sc_tear_active;
+static uint32_t sc_tear_saved_ctrl, sc_tear_saved_ar;
+static uint64_t sc_tear_timeouts;
+
+static void
+sc_tear_init(void)
+{
+	static unsigned once;
+
+	if (__atomic_exchange_n(&once, 1u, __ATOMIC_ACQ_REL) != 0) {
+		return;
+	}
+	uint32_t n = 0;
+	if (PE_parse_boot_argn("sweetfb_tearwait", &n, sizeof(n)) && n == 1) {
+		__atomic_store_n(&sc_tearwait, true, __ATOMIC_RELEASE);
+		printf(SC_TAG " tear wait on: hold submissions until the panel scan reaches blanking\n");
+	}
+}
+
+/*
+ * Command-mode kickoff (dpu_encoder_phys_cmd.c): stop the panel's self refresh, wait for the scan
+ * pointer to reach the end of the frame, hand the new frame over, then reconnect. Without this the
+ * CTL flush lands wherever the scan happens to be and the update tears: a horizontal seam that
+ * drifts with the phase beat. Opt-in via sweetfb_tearwait=1; on any surprise state it falls back to
+ * the old unaligned path instead of touching the registers.
+ */
+static void
+sc_tear_begin(void)
+{
+	sc_tear_active = false;
+	if (!sc_tearwait) {
+		return;
+	}
+	sc_tear_saved_ctrl = mdp_rd(SC_INTF1 + IF_TEAR_CTRL);
+	sc_tear_saved_ar = mdp_rd(SC_INTF1 + IF_AUTOREFRESH);
+	if (!(sc_tear_saved_ar & IF_AUTOREFRESH_BIT)) {
+		return;                 /* ABL left autorefresh off: nothing to gate, do not touch it */
+	}
+	mdp_wr(SC_INTF1 + IF_TEAR_CTRL, sc_tear_saved_ctrl & ~IF_TEAR_EXT_TE);
+	mdp_wr(SC_INTF1 + IF_AUTOREFRESH, sc_tear_saved_ar & ~IF_AUTOREFRESH_BIT);
+	sc_tear_active = true;
+	for (unsigned i = 0; i < 2000; i++) {
+		const uint32_t line = mdp_rd(SC_INTF1 + IF_TEAR_LINE);
+		if (line == 0 || line >= SC_PANEL_VHEIGHT) {
+			return;             /* reached blanking */
+		}
+		sc_nap_us(10);
+	}
+	__atomic_add_fetch(&sc_tear_timeouts, 1, __ATOMIC_RELAXED);
+}
+
+static void
+sc_tear_end(void)
+{
+	if (!sc_tear_active) {
+		return;
+	}
+	mdp_wr(SC_INTF1 + IF_TEAR_CTRL, sc_tear_saved_ctrl);
+	mdp_wr(SC_INTF1 + IF_AUTOREFRESH, sc_tear_saved_ar);
+	sc_tear_active = false;
+}
+
 static bool
 sc_flush_idle(uint32_t bits)
 {
@@ -507,6 +576,9 @@ sc_init_locked(uint64_t panel_pa, uint32_t rowbytes, uint32_t w, uint32_t h)
 	printf(SC_TAG " vig0 %08x stride %u size %08x out %08x format %08x op %08x; qseed3 version %08x op %08x; "
 	    "intf1 tear check %08x autorefresh %08x\n", addr, stride, size, out, mdp_rd(SC_VIG0 + SS_SRC_FORMAT),
 	    mdp_rd(SC_VIG0 + SS_OP_MODE), sc.qseed_version, mdp_rd(SC_QSEED + QS_OP_MODE), te, ar);
+	printf(SC_TAG " intf1 tear ctrl %08x start_pos %08x rd_ptr_irq %08x line %08x\n",
+	    mdp_rd(SC_INTF1 + IF_TEAR_CTRL), mdp_rd(SC_INTF1 + IF_TEAR_START_POS),
+	    mdp_rd(SC_INTF1 + IF_TEAR_RD_PTR_IRQ), mdp_rd(SC_INTF1 + IF_TEAR_LINE));
 	/*
 	 * The only thing that identifies the pipe is that it is fetching the panel memory: show() programs
 	 * SRC_SIZE/XY and OUT_SIZE/XY itself, so those need not match what the ABL left. Tear check and
@@ -822,6 +894,8 @@ sweet_scanout_show(const struct sweet_scan_frame *f)
 		lck_mtx_unlock(&sc.lock);
 		return EBUSY;
 	}
+	sc_tear_init();
+	sc_tear_begin();
 
 	/* connect VIG1 to the mixer one stage above VIG0 the first time it is used */
 	if (sc.pp && pipe == 1 && !sc.vig1_on) {
@@ -887,6 +961,7 @@ sweet_scanout_show(const struct sweet_scan_frame *f)
 
 	__asm__ volatile ("dsb sy" ::: "memory");
 	mdp_wr(SC_CTL0 + CT_FLUSH, flush);
+	sc_tear_end();
 	sc.on_panel = false;
 	sc.cur = pipe;
 	sc.flush_bits = flush;
