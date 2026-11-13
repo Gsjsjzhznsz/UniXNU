@@ -1,0 +1,55 @@
+fb: never remap an IOVA the panel may still be scanning (0280)
+
+scanoutIova() only protected a slot while its surface was still in fZcHeld[].
+zcPoll() releases that hold as soon as the next frame is seen to latch, but the
+DPU keeps reading the latched IOVA until the following one latches, so the slot
+could be unmapped and remapped onto a different surface while still in use. From
+that scan line down the panel then shows the other surface's pages: a horizontal
+seam that moves down the screen while scrolling. The frame data itself is fine,
+which is why kern.sweet_fb_shot (which copies the surface by id) shows no defect.
+
+Pin the two most recently submitted IOVAs and never evict their slots. With four
+slots that still leaves two for rotation; a miss declines the frame to the copy
+path instead of corrupting the panel.
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -440,6 +440,12 @@
+ 	bool          fScanout, fScanoutTried, fScanoutOn;
+ 	uint64_t      fScanoutFrames, fScanoutRefused;
+ 	uint32_t      scanoutIova(SweetSurface *s);
++	/*
++	 * 0280: IOVAs handed to the panel, newest first. The DPU latches one address per frame and
++	 * keeps reading that page range until the next latch, so those slots must not be remapped
++	 * onto another surface underneath it.
++	 */
++	uint32_t      fScanoutPin[2];
+ 	bool          scanoutPresent(SweetSurface *s, uint32_t id, int32_t sx, int32_t sy, int32_t dx, int32_t dy,
+ 	    int32_t w, int32_t h);
+ 	uint64_t      fStPrevT, fStLogT;
+@@ -2327,6 +2333,15 @@
+ 		for (uint32_t k = 0; k < fZcCount; k++) {
+ 			held = held || fZcHeld[k] == fScanoutMaps[i].s;
+ 		}
++		/*
++		 * 0280: a surface whose hold was just released is not necessarily done being scanned.
++		 * The DPU keeps reading the latched IOVA until the next one latches, so remapping that
++		 * slot makes it read another surface's pages from that scan line down -- a horizontal
++		 * seam that moves down the screen while scrolling.
++		 */
++		if (fScanoutMaps[i].iova == fScanoutPin[0] || fScanoutMaps[i].iova == fScanoutPin[1]) {
++			continue;
++		}
+ 		if (!held && (slot < 0 || fScanoutMaps[i].used < fScanoutMaps[slot].used)) {
+ 			slot = (int)i;
+ 		}
+@@ -2450,6 +2465,9 @@
+ 		sweet_hold(s, false);
+ 		return zcDecline(25, "scanout: the pipe refused the frame (earlier flush not taken)", id);
+ 	}
++	/* 0280: the panel now reads this IOVA; keep it mapped until two newer frames have gone by. */
++	fScanoutPin[1] = fScanoutPin[0];
++	fScanoutPin[0] = iova;
+ 	fZcHeld[fZcCount++] = s;        /* keeps the reference sweet_surface_copy gave */
+ 	fZcFront = true;
+ 	fLastFlush = sweet_scanout_flush_bits();        /* the pipe's own flush bits (VIG0/VIG1 + LM0 + CTL, 0272) */
