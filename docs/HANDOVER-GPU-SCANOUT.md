@@ -27,16 +27,20 @@ copy_frames=3 latch_waits=42 vsync_s=58.36 swapsync=0
 gpu submitted=22945 completed=22945 hangs=0
 ```
 
-最近一次构建（内核 `691a02f`，2026-11-13，**未上机**）：CI `43412941766` success，
-`errors.txt` 空，`raphael_dsi.c` 零告警。两个镜像都已打好：
+最近一次构建（内核 `3ca6b55`，2026-11-13，**未上机**）：CI `43416181039` success
+（第一次跑被 macOS runner 抢占失败，`gh run rerun` 后通过），`errors.txt` 空。两个镜像已打好：
 
 | 镜像 | 用途 | sha256 |
 |---|---|---|
-| `validation-20261113/691a02f/boot-691a02f.img` | 默认，行为等同 `b7908b3`（无 DCS） | `80f539e9…124e5d94` |
-| `validation-20261113/691a02f/boot-691a02f-dcs.img` | 打开 `raphael_dcs=1`，可测 DCS 亮度 | `dc373184…27e7ed7d1` |
+| `validation-20261113/3ca6b55/boot-3ca6b55.img` | **推荐**：单管 + `0275` 退休修复 + `0277` 直扫计数 | `43da833a…390093d2` |
+| `validation-20261113/3ca6b55/boot-3ca6b55-dcs.img` | 同上，外加 `raphael_dcs=1`，可测 DCS 亮度 | `d2d0b834…7ebee466` |
 
-DCS 版为了塞进 298 字符的 args 上限，去掉了 `sweetfb_statlog=1`（只影响周期 IOLog，
+DCS 版为塞进 298 字符 args 上限去掉了 `sweetfb_statlog=1`（只影响周期 IOLog，
 `kern.sweet_fb` sysctl 不受影响）。
+
+上机后第一步就跑 `tools/raphael/measure-fps.sh 20`：它每秒打印
+`swaps / coalesced / scanout_frames / scanout_latched / scanout_declines` 的增量，
+直接区分「CA 不产帧」「单管跟不上」「回落 CPU 拷贝」三种情况。
 
 ---
 
