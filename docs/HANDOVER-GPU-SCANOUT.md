@@ -215,9 +215,40 @@ PM8150L 的 `wled@d800`（usid 5）**确实存在且被 raphael 板级 DTS 打�
 一次小幅亮度写并用 `0x52` 回读。不要在缺少 power/ownership 的情况下裸读 MMIO——
 无时钟时 load 可能 stall 或 abort。
 
-> 已试过并撤回：一个默认关闭、`kern.raphael_dsi_request=1` 触发 `ml_io_map` 的只读探针
-> （`raphael_dsi.c` / `0274` / `0276`）。代码本身能编译，但请求路径等于让 root 直接对
-> 未声明 ownership 的 DSI 发 MMIO load，且无任何硬件证据它能安全返回，故未入库。
+**已实现（`0f90a60` + `691a02f`）：`bsd/dev/raphael_dsi.c`，默认关闭**
+
+启动参数 `raphael_dcs=1` 才武装；没有它不映射、不读、不写任何寄存器，镜像行为与不加该模块完全一致。
+
+- 发送：一条 DCS 长写 `0x39`，word count 3，payload `51 hi lo`，补 `0xFF` 到 8 字节。
+  两条 32 位字：`0xC0390003`、`0xFF000051 | (hi<<8) | (lo<<16)`。
+- 前置：轮询 `DSI_STATUS(0x008)` bit2（command-mode MDP busy）清零，上限 200 ms /
+  2 ms 步进，对应下游 `dsi_ctrl_hw_cmn_wait_for_cmd_mode_mdp_idle`。
+- 发包：`TEST_PATTERN_GEN_CTRL(0x15C) = BIT(1)|BIT(2)|(3<<16)` → 两个 dword 推进
+  `TEST_PATTERN_GEN_CMD_DMA_INIT_VAL(0x17C)` → `COMMAND_MODE_DMA_CTRL(0x03C)` 置
+  `BIT(28) EMBEDDED_MODE`（先清 BIT31/30/26）→ `DMA_CMD_LENGTH(0x04C) = 8` → `dsb sy` →
+  `CMD_MODE_DMA_SW_TRIGGER(0x090) = 1`。
+- 完成：轮询 `INT_CTRL(0x110)` bit0 `CMD_MODE_DMA_DONE`，上限 50 ms；bit24 出错则放弃。
+- 收尾：把 `COMMAND_MODE_DMA_CTRL` 还原成读到的原值（帧通路的 DMA 配置不留在被改状态），
+  并 W1C 清掉自己消费的完成位。不 reset、不改 lane/PHY/clock/timing。
+- 接口：`sysctl kern.raphael_dsi`（只读状态，含 hw_version/status/fifo_status/dma_ctrl）、
+  `kern.raphael_dcs_level`（写 0..2047 触发一次）。
+- 包头打包器已 host 测试：对 0/1/2/0xff/0x100/0x123/0x3ff/0x7fe/0x7ff 与下游算法逐字节一致，
+  2048 与空指针被拒。
+
+**未上机验证**。测试顺序（手机在 fastboot 时）：
+1. `kern.sweet_fb` 先确认 `mode=direct`、有画面（DSI 必须在被驱动状态）；
+2. 读 `kern.raphael_dsi` 记录 `status`/`hw_version`（控制器不提供可信版本号，
+   下游是从 DT compatible 选 v2.3，所以版本只作记录）；
+3. 写 `kern.raphael_dcs_level=1023`（中途值），观察画面亮度与 `last_error`；
+4. 成功再试 2 与 2047 两端，确认 `0x52` 回读需要另加（当前未实现回读）。
+
+> 注意：`COMMAND_MODE_DMA_CTRL` 在发送窗口内被切到 EMBEDDED 模式，若此时正好有一帧
+> command-mode DMA 在排队，可能出现一帧闪烁后自恢复。这是 opt-in 的理由，也是先测中间值
+> 而不是先测两端的理由。
+
+早前试过并撤回的方案：`kern.raphael_dsi_request=1` 触发一次性 `ml_io_map` 的纯只读探针。
+它能编译，但等于让 root 直接对未声明 ownership 的 DSI 发 MMIO load，
+无硬件证据证明安全返回，故弃用；现在的实现只在显式 opt-in 下动，且带 idle 前置与超时。
 
 ### P1 串行等待（"拷贝已去掉但还是卡"的真因）
 实测每帧平均：**latch 等待 16.2 ms + SwapWait 9.9 ms**（`pace` 行 `latch_us=1623225`、
