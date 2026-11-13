@@ -80,6 +80,31 @@ gpu_hold_timeouts=18
 注意 `sweetgpufreq=N`（数字）**不生效**：解析里设了 `a630_level`，但固定模式随后又回到最低档，
 实测 `=5` 得到 257 MHz，比调速器还差。要用 `sweetgpuboost=N` 配 `sweetgpufreq=g`。
 
+**根因线索（2026-11-13 实测 `3ca6b55`）：GPU SMMU 翻译故障，地址是坏的。**
+
+```
+SWEET GPU: wait timed out: SMMU CB1 FSR 0x400 FAR 0x12de541f4ff28 FSYNR0 0x10549 SCTLR 0xc00067
+SWEET GPU: wait timed out: GX gdscr 0xf8222800 gfx3d cbcr 0x4221 CX gdscr 0xf8222000;
+          submitted 262 completed 210 soft WPTR 5320
+SWEET GPU: wait timed out: CP RPTR 4752 WPTR 5320 SQE_CNTL 0x1 ... HW_FAULT 0 ... rem 0
+```
+
+`FAR 0x12de541f4ff28` 是 **49 位**地址，超过 48 位 VA 上限；两次事件里这个值**逐位相同**，
+所以是确定性的坏 IOVA，不是随机内存损坏。后果连锁：
+
+1. CP 在等一次永远完不成的取数 → `submitted 262 / completed 210`，52 个提交挂住；
+2. 这些提交里的画面没画完 → 被扫描到时就是**黑色矩形块**；
+3. 客户端 `waitFence` 只能等到超时 → 观感**卡**；
+4. 显示侧其实一直在正常提交（`scanout_frames` 持续增长），所以帧率数字看起来还行。
+
+这也解释了为什么调 GPU 频率只在"更慢时更糟"上有效：257 MHz 让排队的坏提交更多，427/585 MHz
+时饱和到同一个水平。
+
+**下一步（GPU VM，不是显示）**：找出谁把 `0x12de541f4ff28` 写进页表或 IB。
+`sweet_gpu_debug()`（0184，selector 15/16/17 导出 seqno、WPTR、完成 seqno）可以先确认挂住的
+提交编号，再顺着 `sweet_gpu_vm_map()` 的调用点查 IOVA 计算。重点怀疑：把物理地址当 IOVA 用、
+IOVA 基址与 offset 相加溢出、或 32/48 位拼接错误。
+
 所以下一步不该继续调显示，而应该查 GPU 环形缓冲的停滞：
 `sweet_a630.c` 的提交/完成推进、`sweet_gpu_fence_snapshot()` 的粒度（全局 vs 每帧）、
 以及 `0229` 门控是否在等一个不相干的 GPU 工作。
