@@ -1,18 +1,22 @@
 fb: screenshot the surface the panel is reading, not the newest submitted (0282)
 
-kern.sweet_fb_shot copied the surface named by fShotId, which is set when a frame
-is handed to the pipe. The panel latches up to a frame later, so a capture could
-show a frame that never reached the glass -- exactly the kind of difference that
-matters when comparing a screenshot against what the eye sees.
+kern.sweet_fb_shot copied the surface named by fShotId, set when a frame is handed
+to the pipe. The panel latches up to a frame later, so a capture could show a frame
+that never reached the glass, making any screenshot inconclusive.
 
-Prefer the surface behind fScanoutPin[0] (the IOVA the panel latched) and fall
-back to the by-id path when no pin is set, as in copy mode. id/f are hoisted so
-the forward jump does not cross their initialisation.
+Prefer the surface behind fScanoutPin[0], the IOVA the panel latched. fScanoutMaps[]
+owns that surface, so the pointer is borrowed and must not be released; only the
+by-id path takes (and therefore releases) a reference. The first version of this
+patch released the borrowed pointer, which over-released the surface and wedged the
+device -- that is why the release is now guarded by 'borrowed'.
 
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -980,11 +980,34 @@
+@@ -978,13 +978,39 @@
+ {
+ 	AppleCLCD *fb = __atomic_load_n(&sweet_fb_shot_fb, __ATOMIC_ACQUIRE);
  	SweetSurface *s = NULL;
++	bool borrowed = false;
  	uintptr_t src = 0;
  	uint32_t w, h, stride;
 +	uint32_t id = 0, f = 0;         /* 0282: hoisted so the pin fast path can jump to copy */
@@ -25,11 +29,15 @@ the forward jump does not cross their initialisation.
 +	 * 0282: capture the surface the panel is reading, not the newest submitted one. fShotId is set
 +	 * when a frame is handed to the pipe; the panel latches up to a frame later, so only the pinned
 +	 * IOVA is guaranteed to be what the eye is looking at.
++	 *
++	 * fScanoutMaps[] owns the reference to that surface, so the pointer is borrowed here and must
++	 * not be released -- releasing it would drop a reference this path never took.
 +	 */
 +	if (fb->fScanoutPin[0] != 0) {
 +		for (unsigned i = 0; i < SWEET_SCANOUT_MAPS; i++) {
 +			if (fb->fScanoutMaps[i].s != NULL && fb->fScanoutMaps[i].iova == fb->fScanoutPin[0]) {
 +				s = fb->fScanoutMaps[i].s;
++				borrowed = true;
 +				break;
 +			}
 +		}
@@ -39,15 +47,13 @@ the forward jump does not cross their initialisation.
 +		w = fb->fLogicalW;
 +		h = fb->fLogicalH;
 +		stride = s->bytesPerRow;
-+		OSSafeReleaseNULL(s);
-+		goto copy;
++		goto copy;                      /* borrowed: nothing to release */
 +	}
-+	OSSafeReleaseNULL(s);
 +	id = __atomic_load_n(&fb->fShotId, __ATOMIC_ACQUIRE);
  	if ((fb->fZcFront || fb->fScanFront) && id != 0 && (s = sweet_surface_copy(id)) != NULL && s != fb->fSurface &&
  	    s->kernelAddress() != 0 && s->width >= fb->fLogicalW && s->height >= fb->fLogicalH) {
  		src = s->kernelAddress() + s->offset;
-@@ -993,7 +1016,7 @@
+@@ -993,7 +1019,7 @@
  		stride = s->bytesPerRow;
  	} else {
  		OSSafeReleaseNULL(s);
@@ -56,7 +62,7 @@ the forward jump does not cross their initialisation.
  		src = f < 3 && fb->fFlip ? fb->fBufVA[f] : fb->fPixels;
  		if (f != 0 && fb->fHw) {
  			w = fb->fLogicalW;
-@@ -1005,6 +1028,7 @@
+@@ -1005,6 +1031,7 @@
  			stride = fb->fRowBytes;
  		}
  	}
@@ -64,3 +70,14 @@ the forward jump does not cross their initialisation.
  	uint32_t dw = w / scale, dh = h / scale;
  	if (src == 0 || dw == 0 || dh == 0 || (uint64_t)dw * dh * 4 > cap) {
  		OSSafeReleaseNULL(s);
+@@ -1017,7 +1044,9 @@
+ 			out[x] = in[x * scale];
+ 		}
+ 	}
+-	OSSafeReleaseNULL(s);
++	if (!borrowed) {
++		OSSafeReleaseNULL(s);   /* 0282: only the by-id path owns a reference */
++	}
+ 	*ow = dw;
+ 	*oh = dh;
+ 	return 0;
