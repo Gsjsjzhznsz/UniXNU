@@ -1,0 +1,45 @@
+gpu: report an indirect-buffer address outside the GPU window (0278)
+
+The CP will fetch an indirect buffer from whatever address the two dwords in
+the ring carry, and a bad one stalls submission instead of failing, which shows
+up as "CP RPTR ... WPTR ... rem 0" plus client fence timeouts. raphael's GPU VA
+window is [GVM_BASE, GVM_END) = [0x80000000, 0x100000000), so any IB address
+outside it, or not page aligned, is a caller bug worth naming.
+
+This only reports: each distinct bad address is printed once with its seqno and
+the submission still goes ahead exactly as before, so the run behaves the same
+while the log says which address is wrong.
+
+Note for the next reader: SMMU CB1 FSR 0x400 with FAR 0x12de541f4ff28 is a
+stale status bit from boot that sweet_gpu_submit() already clears; it is not a
+runtime fault and must not be read as the cause of a stall.
+
+--- a/bsd/dev/sweet_a630.c
++++ b/bsd/dev/sweet_a630.c
+@@ -3920,6 +3920,26 @@
+ 	if (!sweet_gpu_ready() || count == 0 || count > 128) {
+ 		return 0;
+ 	}
++	/*
++	 * 0278: the CP fetches an indirect buffer from whatever address the two dwords below carry, and
++	 * a bad one hangs submission instead of failing. raphael's GPU window is [GVM_BASE, GVM_END).
++	 * Report a distinct out-of-window or unaligned address once, and still submit: this only adds
++	 * diagnosis, it does not change behaviour.
++	 */
++	{
++		static uint64_t bad_ib_seen;
++		for (unsigned i = 0; i < count; i++) {
++			const uint64_t va = ib_iova[i];
++			if (va >= GVM_BASE && va < GVM_END && (va & 0xfff) == 0) {
++				continue;
++			}
++			if (__atomic_exchange_n(&bad_ib_seen, va, __ATOMIC_ACQ_REL) != va) {
++				printf("SWEET GPU: IB %u of %u at 0x%llx is outside the GPU window [0x%llx,0x%llx) or not page aligned (seqno %u)\n",
++				    i, count, (unsigned long long)va, (unsigned long long)GVM_BASE,
++				    (unsigned long long)GVM_END, a630_dev.seqno);
++			}
++		}
++	}
+ 	a630_last_active = mach_absolute_time();
+ 	if (!a630_awake && !gpu_resume()) {
+ 		return 0;

@@ -80,30 +80,42 @@ gpu_hold_timeouts=18
 注意 `sweetgpufreq=N`（数字）**不生效**：解析里设了 `a630_level`，但固定模式随后又回到最低档，
 实测 `=5` 得到 257 MHz，比调速器还差。要用 `sweetgpuboost=N` 配 `sweetgpufreq=g`。
 
-**根因线索（2026-11-13 实测 `3ca6b55`）：GPU SMMU 翻译故障，地址是坏的。**
+**已排除：`SMMU CB1 FSR 0x400` 不是运行时故障（2026-11-13 修正）**
+
+之前把这条当成根因是推断过度了。`sweet_gpu_submit()` 里写得很清楚：
+
+```c
+uint32_t fsr = gpu_rd(b, SMMU_CB_FSR);
+if (fsr & 0xc00001feu) { (void)sweet_gpu_check_fault(); return 0; }
+if (fsr) { gpu_wr(b, SMMU_CB_FSR, fsr); /* stale status bits (0x400 from boot) */ }
+```
+
+`0x400` 是**开机残留**，每次提交都会被清掉；配套的 `FAR 0x12de541f4ff28`（49 位）
+也是启动时留下的垃圾值，不是运行时访问。所以不要拿它当线索。
+
+**仍然成立的现象：CP 不排空环形缓冲。**
 
 ```
-SWEET GPU: wait timed out: SMMU CB1 FSR 0x400 FAR 0x12de541f4ff28 FSYNR0 0x10549 SCTLR 0xc00067
-SWEET GPU: wait timed out: GX gdscr 0xf8222800 gfx3d cbcr 0x4221 CX gdscr 0xf8222000;
-          submitted 262 completed 210 soft WPTR 5320
-SWEET GPU: wait timed out: CP RPTR 4752 WPTR 5320 SQE_CNTL 0x1 ... HW_FAULT 0 ... rem 0
+SWEET GPU: wait timed out: GX gdscr 0xf8222800 ... submitted 262 completed 210 soft WPTR 5320
+SWEET GPU: wait timed out: CP RPTR 4752 WPTR 5320 SQE_CNTL 0x1 ... HW_FAULT 0 CP_IRQ 0 ... rem 0
 ```
 
-`FAR 0x12de541f4ff28` 是 **49 位**地址，超过 48 位 VA 上限；两次事件里这个值**逐位相同**，
-所以是确定性的坏 IOVA，不是随机内存损坏。后果连锁：
+`WPTR 5320 - RPTR 4752 = 568` dword 卡住，`HW_FAULT 0`、`CP_IRQ 0` —— 是**卡住**而不是报错。
+后果仍然是黑块（没画完的帧被扫到）与卡顿（客户端 `waitFence` 只能等超时）。
 
-1. CP 在等一次永远完不成的取数 → `submitted 262 / completed 210`，52 个提交挂住；
-2. 这些提交里的画面没画完 → 被扫描到时就是**黑色矩形块**；
-3. 客户端 `waitFence` 只能等到超时 → 观感**卡**；
-4. 显示侧其实一直在正常提交（`scanout_frames` 持续增长），所以帧率数字看起来还行。
+**可疑点：IB 地址没有范围校验。** `sweet_gpu_submit()` 把客户端给的 IOVA 直接写成环形缓冲里的
+两个 dword：
 
-这也解释了为什么调 GPU 频率只在"更慢时更糟"上有效：257 MHz 让排队的坏提交更多，427/585 MHz
-时饱和到同一个水平。
+```c
+ring_emit((uint32_t)ib_iova[i]);
+ring_emit((uint32_t)(ib_iova[i] >> 32));
+```
 
-**下一步（GPU VM，不是显示）**：找出谁把 `0x12de541f4ff28` 写进页表或 IB。
-`sweet_gpu_debug()`（0184，selector 15/16/17 导出 seqno、WPTR、完成 seqno）可以先确认挂住的
-提交编号，再顺着 `sweet_gpu_vm_map()` 的调用点查 IOVA 计算。重点怀疑：把物理地址当 IOVA 用、
-IOVA 基址与 offset 相加溢出、或 32/48 位拼接错误。
+raphael 的 GPU VA 窗口是 `[GVM_BASE, GVM_END) = [0x80000000, 0x100000000)`，但这里什么值都收。
+一个 64 位越界地址会让 CP 去取一块根本不存在的内存，表现正是「卡住 + 无 fault 位」。
+
+`0278` 先加了**只报不改**的校验：越界或非页对齐的 IB 地址按不同值各打一次，带 seqno，
+提交行为完全不变。下一次上机若打出这条，就等于把坏地址锁到了具体调用点。
 
 所以下一步不该继续调显示，而应该查 GPU 环形缓冲的停滞：
 `sweet_a630.c` 的提交/完成推进、`sweet_gpu_fence_snapshot()` 的粒度（全局 vs 每帧）、
