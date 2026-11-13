@@ -284,12 +284,29 @@ pending 位重新置起，`latchedNow()` 立刻变 false，于是上一帧其实
 `show()` 的非 0 返回全部发生在写 `SRC0`/`CTL_FLUSH` 之前，所以「拒绝时没有 MMIO 拥有这个引用」成立——
 这条不变量是 0275 提前释放的依据，改 `show()` 时必须保持。
 
-**0271 的测量盲点（还没修）**：`zcPresent()` 的 scanout 分支提前 `return true`，绕过了
-`fSt.zc`/`zcAbs`/`fZcFrames` 和 `scanAddr()` 的 `tr->scan`，所以 `zc_s`、`zc_us`、
-`scan_replaced`、trace 的 `scan_us` 都**不反映直扫**；`fSwapScanID` 只代表「已提交 flush」，
-真正的 latch 观察在 `zcPoll()` 的 `fSwapDone`。要判断 0275 的收益，看
-`swaps_s`（同场景滑动）、`coalesced`、以及日志里 `MDP flush ... did not latch within 25 ms`
-是否消失，不要看 `zc_s`。
+**测量盲点已修（`0277`，`3ca6b55`）**：`zcPresent()` 的 scanout 分支提前 `return true`，
+绕过了 `fSt.zc`/`zcAbs`/`fZcFrames`，所以直扫以前在 `kern.sweet_fb` 里完全不可见。现在有四个
+专用字段（在同一行 `kern.sweet_fb` 末尾）：
+
+| 字段 | 含义 |
+|---|---|
+| `scanout_frames` | `scanoutPresent()` 接受了这一帧（**提交**，不等于上屏） |
+| `scanout_declines` | 被拒（容量/IOVA/几何/管道），这一帧走了 CPU 拷贝 |
+| `scanout_latched` | `zcPoll()` 看到 flush 位清 0（**真的到了面板**） |
+| `scanout_us` / `scanout_us_max` | 进入 `scanoutPresent()` 的耗时均值 / 窗口内峰值 |
+
+判读方法：
+
+- `scanout_frames - scanout_latched` 持续增长 → 有帧提交了但没被退休，问题在管道或 hold。
+- `scanout_latched / win_ms` 接近 59 → 管道跟得上，瓶颈在 CoreAnimation 产帧（GPU/fence）。
+- `scanout_latched` 明显低于 `scanout_frames` 而 `declines` 很小 → 单 pipe 在替换 pending 帧，
+  这正是双 pipe 想解决的那一段。
+- `scanout_us_max` 首窗口会有一次 ~100 ms 的离群值，那是首帧 `sweet_scanout_init()` 的试 flush，
+  不是稳态。
+
+另外仍要看：`swaps_s`（同场景滑动）、`coalesced`、以及日志里
+`MDP flush ... did not latch within 25 ms` 是否消失。`zc_s` / `zc_us` 依旧只代表 low-pool
+零拷贝，**不要**拿它衡量直扫。
 
 **剩下的一条：双 SSPP 乒乓已实现但默认关闭（`b7908b3`）**
 `1944d59`/`d6156fa`/`f54a0a3` 落地了 0272，但**上机不可用**，`sweet_scanout.c` 里
