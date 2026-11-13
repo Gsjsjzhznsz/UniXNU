@@ -1,0 +1,173 @@
+fb: present a frame one swap behind, so it is never still being drawn (0283)
+
+The moving black block is a frame the panel read while CoreAnimation had drawn
+only part of it: the region still to come is cleared opaque black, which is why
+the block moves with the content. A GPU fence cannot catch it, because the draw
+had not been submitted yet when the fence was sampled (0281 measured
+scanout_us_max 624us, so that fence always passed instantly).
+
+Present the previous frame instead of the newest: when a newer swap arrives the
+pending frame is promoted to a show slot, so it has had a whole swap to finish
+before the panel reads it. swapFired() waits for that promotion, and a two-frame
+bound flushes a frame that goes stale so boot's first frame and the final frame
+before the UI idles still reach the panel.
+
+Off by default (sweetfb_latepresent=1 enables it), so the existing path is
+unchanged without the flag. The show slot owns its surfaces exactly like
+fPendHold: promotion moves pointers without touching the hold count, replacing a
+slot releases the one it replaced, and a failed present is re-queued into the
+slot it came from. The GPU gate still runs before the pending frame is taken.
+
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -280,6 +280,10 @@
+ 	 * framebuffer (console, panics, power-off fade).
+ 	 */
+ 	SweetSurface *fPendHold[4];     /* in-use holds of the swap not yet copied */
++	SweetSurface *fShowHold[4];     /* 0283: holds of the frame waiting to be presented (one swap behind) */
++	uint8_t       fShowRec[SWEET_FB_SWAP_REC_SIZE];   /* 0283: that frame's record */
++	bool          fShowValid;       /* 0283 */
++	bool          fLatePresent;     /* 0283: sweetfb_latepresent=1 presents one swap behind */
+ 	uintptr_t     fDraw;            /* where present() draws */
+ 	uint32_t      fDrawIdx;
+ 	uint8_t       fBarsMask;        /* frames whose scaling bars are black */
+@@ -932,6 +936,12 @@
+ 	PE_parse_boot_argn("sweetfb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
+ 	fVsyncUS = SWEET_FB_VSYNC_US;
++	{
++		uint32_t lp = 0;
++		if (PE_parse_boot_argn("sweetfb_latepresent", &lp, sizeof(lp)) && lp == 1) {
++			fLatePresent = true;    /* 0283 */
++		}
++	}
+ 	/*
+ 	 * sweetfb_vsync=1: tick vsync at the panel-copy rate instead of 60 Hz.
+ 	 * CoreAnimation renders (in software, on the CPU) once per vsync; at
+@@ -1216,32 +1226,58 @@
+ 	fb->scanBlitPoll();     /* 0241: a GPU scan-out copy whose fence passed is scanned now */
+ 	fb->latchWatch();       /* 0217: while a frame is queued this timer comes back every 500 us */
+ 	IOLockLock(fb->fLock);
+-	if (!fb->fDirty) {
++	const bool haveShow = fb->fLatePresent && fb->fShowValid;
++	if (fb->fLatePresent && !haveShow && fb->fDirty) {
++		/*
++		 * 0283: late present hands a frame over only once a newer swap has arrived, so its draw has
++		 * had a frame to finish; this wait is what creates that one-swap gap. The bound keeps the
++		 * first frame after boot and the last frame before the UI idles from being held forever.
++		 */
++		const uint64_t age = mach_absolute_time() - fb->fPendAbs;
++		uint64_t capAbs;
++		nanoseconds_to_absolutetime(2ull * SWEET_FB_VSYNC_US * NSEC_PER_USEC, &capAbs);
++		if (age < capAbs) {
++			uint64_t ns;
++			absolutetime_to_nanoseconds(capAbs - age, &ns);
++			fb->fSwapTimer->setTimeoutUS((uint32_t)(ns / 1000 + 1));
++			IOLockUnlock(fb->fLock);
++			return;
++		}
++	}
++	if (!fb->fDirty && !haveShow) {
+ 		IOLockUnlock(fb->fLock);
+ 		return;
+ 	}
+-	/* 0241: the GPU scan-out copy needs no hold: it is queued behind the frame's own GPU work on the same ring */
+-	if (!fb->scanGpuActive()) {
+-		const int gate = fb->gpuGateOpen(mach_absolute_time());
+-		if (gate == 0) {
+-			IOLockUnlock(fb->fLock);
+-			fb->fSwapTimer->setTimeoutUS(250);  /* 0229: the GPU is still drawing what was submitted before this swap */
+-			return;
+-		}
+-		if (gate == 2) {
+-			/* 0279: drop it rather than show a half-drawn frame; the panel keeps the last complete one. */
+-			fb->fDirty = false;
+-			memcpy(taken, fb->fPendHold, sizeof(taken));
+-			bzero(fb->fPendHold, sizeof(fb->fPendHold));
+-			IOLockUnlock(fb->fLock);
+-			sweet_hold_release(taken);
+-			return;
+-		}
+-	}
+-	memcpy(fb->fEarlyRec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
+-	fb->fDirty = false;
+-	memcpy(taken, fb->fPendHold, sizeof(taken));
+-	bzero(fb->fPendHold, sizeof(fb->fPendHold));
++	if (haveShow) {
++		/* 0283: a frame that has already waited a swap; the GPU gate below does not apply to it. */
++		memcpy(fb->fEarlyRec, fb->fShowRec, SWEET_FB_SWAP_REC_SIZE);
++		memcpy(taken, fb->fShowHold, sizeof(taken));
++		bzero(fb->fShowHold, sizeof(fb->fShowHold));
++		fb->fShowValid = false;
++	} else {
++		/* 0241: the GPU scan-out copy needs no hold: it is queued behind the frame's own GPU work on the same ring */
++		if (!fb->scanGpuActive()) {
++			const int gate = fb->gpuGateOpen(mach_absolute_time());
++			if (gate == 0) {
++				IOLockUnlock(fb->fLock);
++				fb->fSwapTimer->setTimeoutUS(250);  /* 0229: the GPU is still drawing what was submitted before this swap */
++				return;
++			}
++			if (gate == 2) {
++				/* 0279: drop it rather than show a half-drawn frame; the panel keeps the last complete one. */
++				fb->fDirty = false;
++				memcpy(taken, fb->fPendHold, sizeof(taken));
++				bzero(fb->fPendHold, sizeof(fb->fPendHold));
++				IOLockUnlock(fb->fLock);
++				sweet_hold_release(taken);
++				return;
++			}
++		}
++		memcpy(fb->fEarlyRec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
++		fb->fDirty = false;
++		memcpy(taken, fb->fPendHold, sizeof(taken));
++		bzero(fb->fPendHold, sizeof(fb->fPendHold));
++	}
+ 	IOLockUnlock(fb->fLock);
+ 
+ 	fb->quietConsole();
+@@ -1252,7 +1288,13 @@
+ 	}
+ 	SweetSurface *dropped[4] = {};
+ 	IOLockLock(fb->fLock);
+-	if (!fb->fDirty) {
++	if (haveShow) {
++		/* 0283: re-queue into the show slot, releasing whatever newer frame had taken it. */
++		memcpy(dropped, fb->fShowHold, sizeof(dropped));
++		memcpy(fb->fShowRec, fb->fEarlyRec, SWEET_FB_SWAP_REC_SIZE);
++		memcpy(fb->fShowHold, taken, sizeof(taken));
++		fb->fShowValid = true;
++	} else if (!fb->fDirty) {
+ 		memcpy(fb->fPending, fb->fEarlyRec, SWEET_FB_SWAP_REC_SIZE);
+ 		fb->fDirty = true;
+ 		memcpy(fb->fPendHold, taken, sizeof(taken));
+@@ -1494,7 +1536,20 @@
+ 		tr->id = get32(rec, 0x50);
+ 		tr->swap = mach_absolute_time();
+ 	}
+-	if (fDirty) {
++	SweetSurface *oldShow[4] = {};
++	if (fLatePresent && fDirty) {
++		/*
++		 * 0283: a newer swap arrived while the pending frame was still waiting. Promote it to the
++		 * show slot: it is now one swap old and its draw has had a whole frame to finish, so the
++		 * panel never reads a surface that is still being drawn -- the source of the moving black
++		 * block. The show slot it replaces, if any, was never presented.
++		 */
++		memcpy(fShowRec, fPending, SWEET_FB_SWAP_REC_SIZE);
++		memcpy(oldShow, fShowHold, sizeof(oldShow));
++		memcpy(fShowHold, fPendHold, sizeof(fShowHold));
++		bzero(fPendHold, sizeof(fPendHold));
++		fShowValid = true;
++	} else if (fDirty) {
+ 		fSt.coalesced++;        /* the previous swap never reached the panel */
+ 	}
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
+@@ -1503,6 +1558,7 @@
+ 	memcpy(fPendHold, held, sizeof(held));
+ 	IOLockUnlock(fLock);
+ 	sweet_hold_release(dropped);
++	sweet_hold_release(oldShow);
+ 	if (fEarly && !fPowerOff) {
+ 		fSwapTimer->setTimeoutUS(1);    /* scan it now: the MDP latches at its next vsync */
+ 	}
