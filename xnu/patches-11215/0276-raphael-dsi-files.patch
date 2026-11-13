@@ -1,0 +1,18 @@
+raphael: register the DSI DCS brightness source
+
+The 0274 stage script installs bsd/dev/raphael_dsi.c and .h; this patch
+registers the source with the SWEET kernel build. The driver is inert unless
+the boot argument raphael_dcs=1 is given.
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -117,7 +117,8 @@ bsd/dev/sweet_cpufreq.c			standard
+ bsd/dev/sweet_charger.c			standard
+ bsd/dev/sweet_smmu.c			standard
+ bsd/dev/sweet_fb.c			standard
+ bsd/dev/sweet_scanout.c		standard
++bsd/dev/raphael_dsi.c			standard
+ bsd/dev/sweet_a630.c			standard
+ bsd/dev/sweet_a630_pas.c			standard
+ bsd/dev/beryllium_wlan.c		standard
