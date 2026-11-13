@@ -47,6 +47,28 @@ CoreAnimation 的产帧速度。剩下 8% 的 `frames - latched` 是被新帧替
 因此双 pipe 乒乓（0272）**不再是达到 60 fps 的必要条件**，优先级应下调为「减少被替换的帧」，
 而不是「解决卡顿」。
 
+**同一轮上机的新发现：观感仍然卡，且渲染时黑色块闪现——瓶颈不在显示路径。**
+
+用户实机反馈：帧率数字上去了，但滑动依然卡顿，并且画面有黑色矩形块闪现（项目一开始就有）。
+同一份日志里出现的是 GPU 侧的证据：
+
+```
+SWEET GPU: wait timed out: CP RPTR 4752 WPTR 5320 SQE_CNTL 0x1 STATUS_1 0x8103471e
+          RBBM_STATUS 0xef15f5 HW_FAULT 0 CP_IRQ 0 PROTECT 0 IB1 0817c0000 rem 0
+SWEET GPU: wait timed out: CP RPTR 5424 WPTR 5661 ...
+gpu_hold_timeouts=18
+```
+
+`WPTR > RPTR` 且 `rem 0` 说明命令已经推进到环形缓冲里但没被消费完，等待超时。这直接解释两件事：
+
+1. **卡顿**：`0229` 的门控在 GPU 没完成前把 swap 最多压 50 ms（`gpu_hold_timeouts` 就是在数这个），
+   观感是延迟而不是帧率——所以计数器显示 55–60 fps，手却觉得卡。
+2. **黑块**：GPU 没画完就交帧，被扫描的那块内存还是空的/旧的，表现为黑色矩形。
+
+所以下一步不该继续调显示，而应该查 GPU 环形缓冲的停滞：
+`sweet_a630.c` 的提交/完成推进、`sweet_gpu_fence_snapshot()` 的粒度（全局 vs 每帧）、
+以及 `0229` 门控是否在等一个不相干的 GPU 工作。
+
 对比基线（内核 `f54a0a3`，2026-11-12，滑动中）：
 
 ```
