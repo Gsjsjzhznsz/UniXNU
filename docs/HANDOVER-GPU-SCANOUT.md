@@ -27,10 +27,16 @@ copy_frames=3 latch_waits=42 vsync_s=58.36 swapsync=0
 gpu submitted=22945 completed=22945 hangs=0
 ```
 
-最近一次构建（内核 `b7908b3`，2026-11-13，**未上机**）：CI `43332422963` success，
-`errors.txt` 空，镜像已打好：
-`ios16-reference/validation-20261112/b7908b3/boot-b7908b3.img`
-（sha256 `158893890687b293df52cb5889f7b0d06cd1586bebca356098e7baaaa726865d`）。
+最近一次构建（内核 `691a02f`，2026-11-13，**未上机**）：CI `43412941766` success，
+`errors.txt` 空，`raphael_dsi.c` 零告警。两个镜像都已打好：
+
+| 镜像 | 用途 | sha256 |
+|---|---|---|
+| `validation-20261113/691a02f/boot-691a02f.img` | 默认，行为等同 `b7908b3`（无 DCS） | `80f539e9…124e5d94` |
+| `validation-20261113/691a02f/boot-691a02f-dcs.img` | 打开 `raphael_dcs=1`，可测 DCS 亮度 | `dc373184…27e7ed7d1` |
+
+DCS 版为了塞进 298 字符的 args 上限，去掉了 `sweetfb_statlog=1`（只影响周期 IOLog，
+`kern.sweet_fb` sysctl 不受影响）。
 
 ---
 
