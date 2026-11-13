@@ -29,14 +29,23 @@ KEY=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/keys/raphael_ios_ed25519
 SYSCTL=/private/var/jb/usr/sbin/sysctl
 
 ssh_fb() {
-	ssh -o BatchMode=yes -o ConnectTimeout=5 -i "$KEY" "$HOST" "$SYSCTL -n kern.sweet_fb" 2>/dev/null
+	ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=5 -i "$KEY" "$HOST" \
+		"$SYSCTL -n kern.sweet_fb" 2>/dev/null
 }
 
 field() { # field <line> <key>
 	printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
 }
 
-line=$(ssh_fb) || { echo "cannot reach $HOST (phone booted? USB link up?)" >&2; exit 1; }
+# The USB gadget drops out while the display sleeps; retry instead of aborting.
+probe=
+for _ in $(seq 1 10); do
+	probe=$(ssh_fb) && [ -n "$probe" ] && break
+	probe=
+	sleep 2
+done
+[ -n "$probe" ] || { echo "cannot reach $HOST (phone booted? screen awake?)" >&2; exit 1; }
+line=$probe
 
 prev_swaps=$(field "$line" swaps)
 prev_frames=$(field "$line" scanout_frames)

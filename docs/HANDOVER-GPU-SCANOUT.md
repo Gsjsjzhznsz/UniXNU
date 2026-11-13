@@ -18,7 +18,36 @@ CoreAnimation 交出的 IOSurface 通过显示流自己的 stage-1 页表被 **V
   亮度/唤醒未解决（见 §7 P0，已确认走 DCS 而不是 WLED）。
 - **不可用**：`0272` 双 VIG 乒乓——`sweet_scanout.c` 里 `sc.pp` 已强制 `false`，原因见 §7 P1。
 
-最近一次上机实测（内核 `f54a0a3`，2026-11-12，滑动中）：
+**上机实测（内核 `3ca6b55`，2026-11-13，滑动中）—— 0275 + 0277 生效**
+
+```
+mode=direct hz=59 swaps_s 峰值 60.49（活跃期常见 55–60）
+latch_waits=1  latch_timeouts=0        <- 之前是 42–49 与多次 25 ms 超时
+coalesced_s 0–5（之前 9.89）
+copy_frames=5（全部在启动初期）
+scanout_frames=3285 scanout_latched=3034 scanout_declines=148
+scanout_us=719 µs mean, scanout_us_max=848
+```
+
+逐秒采样（同一进程，含息屏空档）：
+
+```
+sec  swaps  coal  frames  latch  decline  latchw
+  2     24     0      25     22        4       0
+  9     59     5      53     53        0       0
+ 13     76     0      76     76        0       0
+ 15    102     4      99     91        0       0
+```
+
+结论：`latchw` 全 0 说明 work-loop 上的 25 ms 忙等已消失；活跃秒的 `swaps` 能到 76–102，
+`latch` 紧随其后（差值是仍在管道里的 1–2 帧），**单管已经不再是瓶颈**，链路跟的是
+CoreAnimation 的产帧速度。剩下 8% 的 `frames - latched` 是被新帧替换掉的，
+4.5% 的 `declines` 是回落 CPU 拷贝。
+
+因此双 pipe 乒乓（0272）**不再是达到 60 fps 的必要条件**，优先级应下调为「减少被替换的帧」，
+而不是「解决卡顿」。
+
+对比基线（内核 `f54a0a3`，2026-11-12，滑动中）：
 
 ```
 mode=direct hz=59 up_s=2333 win_ms=1010
