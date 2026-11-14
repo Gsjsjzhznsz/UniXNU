@@ -518,18 +518,12 @@ sc_tear_end(void)
 }
 
 static bool sc_holdflush;
+static uint64_t sc_holdflush_declines;
+static uint32_t sc_holdflush_logged;
 
 static bool
 sc_flush_idle(uint32_t bits)
 {
-	static unsigned once;
-	if (__atomic_exchange_n(&once, 1u, __ATOMIC_ACQ_REL) == 0) {
-		uint32_t enabled = 0;
-		if (PE_parse_boot_argn("sweetfb_holdflush", &enabled, sizeof(enabled)) && enabled == 1) {
-			__atomic_store_n(&sc_holdflush, true, __ATOMIC_RELEASE);
-			printf(SC_TAG " hold pending flush: decline instead of replacing after 2 ms (diagnostic)\n");
-		}
-	}
 	for (unsigned i = 0; i < 8; i++) {
 		if ((mdp_rd(SC_CTL0 + CT_FLUSH) & bits) == 0) {
 			if (i != 0) {
@@ -540,6 +534,10 @@ sc_flush_idle(uint32_t bits)
 		sc_nap_us(250);
 	}
 	if (__atomic_load_n(&sc_holdflush, __ATOMIC_ACQUIRE)) {
+		const uint64_t declines = __atomic_add_fetch(&sc_holdflush_declines, 1u, __ATOMIC_RELAXED);
+		if (__atomic_add_fetch(&sc_holdflush_logged, 1u, __ATOMIC_RELAXED) <= 8) {
+			printf(SC_TAG " holdflush decline %llu: VIG0 flush pending after 2 ms\n", (unsigned long long)declines);
+		}
 		return false;
 	}
 	sc.replaced++;
@@ -812,11 +810,14 @@ sweet_scanout_init(uint64_t panel_pa, uint32_t rowbytes, uint32_t w, uint32_t h)
 	sc_lock_init();
 	lck_mtx_lock(&sc.lock);
 	if (!sc.tried) {
+		uint32_t holdflush = 0;
 		sc.tried = true;
+		sc_holdflush = PE_parse_boot_argn("sweetfb_holdflush", &holdflush, sizeof(holdflush)) && holdflush == 1;
 		sc.error = sc_init_locked(panel_pa, rowbytes, w, h);
 		sc.ready = sc.error == 0;
 		if (sc.ready) {
 			kdp_register_callout(sc_panic_callout, NULL);
+			printf(SC_TAG " pending-flush policy: %s\n", sc_holdflush ? "decline after 2 ms" : "replace after 2 ms");
 		}
 	}
 	const int error = sc.error;
