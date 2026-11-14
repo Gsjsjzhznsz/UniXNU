@@ -1,12 +1,21 @@
 # GPU 直扫交接文档（raphael / SM8150 / Adreno 640 / iOS 18.7.8）
 
 > 目标：iOS 的合成结果由 DPU **直接扫描**，CPU 不再拷贝 10.9 MB/帧。
-> 结论：**直扫已跑通（单 VIG0）**，`copy_frames` 停在启动初期。**60 fps 与亮度都还没达标**，
+> 结论：**直扫已跑通（单 VIG0）**；DCS `0x51` 背光写入已实机确认。60 fps 稳态、动态黑块和唤醒仍未达标，
 > 双 pipe 乒乓已写但默认关闭。未解决项见 §7。
 
 ---
 
-## 0. 一句话现状（2026-11-13 更新）
+## 0. 一句话现状（2026-11-14 更新）
+
+**公开证据检查（2026-11-14）**
+
+- UniXNU 的 [raphael 设备索引](https://unixnu.com/devices/models/raphael)列出多个移植仓库，但其中独立 K20 Pro 记录把 GPU 标为 `planned`，且明确写明公开源码/设备日志不足；[penYo22 记录](https://unixnu.com/devices/raphael)也说明 GitHub 当前无法读取，需维护者补充启动证据。没有找到可引用的公开 raphael GPU scanout 成功案例。
+- UniXNU [显示适配指南](https://unixnu.com/zh/porting/display)指出 compositor 可能在 GPU 命令完成前就提交 swap；安全的 direct scanout 必须等对应 GPU 写 fence 后再 flip，并分别测 GPU wait、flip 和 panel latch。它支持 fence handoff 的通用要求，但不是本机型的黑块根因证明。
+- UniXNU [GPU 适配指南](https://unixnu.com/zh/porting/gpu)建议把同一次触控对应的 command commit、GPU completion、显示 validation/fence wait/flip/latch 放在统一时间线上；[GPU 帧诊断指南](https://unixnu.com/zh/porting/gpu-diagnostics)列出了触控边界、render/encode/complete 线程采样、GPU pass、fence 和 display latch 的关联证据。
+- 本仓实测已否定“只把 SwapEnd 延后一帧就足以修复”的强结论：`0281` fresh-fence wait 的 `scanout_us_max` 仅约 624 µs，说明当时 fence snapshot 立即通过；late-present `0283` 的 15 秒窗口 `swaps_s` 均值 38.23（6.98–54.17），未证明 60 fps，用户可见效果/延迟尚无结论。保留 `0283` 为 opt-in，不宣称修复。
+- [本轮 late-present A/B 记录](../validation-20261113/448fd78/retest/RESULTS.md)中 20 帧截图证实画面在变化，但低分辨率静态像素检测不能替代对移动黑块的视觉判定。设备当前使用无 late-present 的对照镜像。
+- Dynamic Island：此前通过 SSH 直接读到 MobileGestalt `CacheExtra[DeviceSupportsDynamicIsland]=True`；本次整理末尾复核时 `dynamic-island.sh show` 报 cache missing，因此该值只作为上轮历史读数，不宣称当前仍有效。即便为 `True` 也只证明能力 override，不证明 SpringBoard 已画出岛或 DPU 多图层。`usblink.sh` 默认 SSH key 回退已修复；cache 缺失时需等系统重新生成后再读，不要盲写。
 
 CoreAnimation 交出的 IOSurface 通过显示流自己的 stage-1 页表被 **VIG0** 直接读取，QSEED3 做
 `1125x2436 → 1080x2340`，每帧 CPU 只做 20 来次 MMIO 写。
@@ -14,9 +23,8 @@ CoreAnimation 交出的 IOSurface 通过显示流自己的 stage-1 页表被 **V
 - **已确认可用**：`mode=direct`、`copy_frames` 不随运行增长（累计 3–4，全在启动初期）、
   GPU `submitted == completed`、`hangs=0`。滑动窗口实测 `swaps_s` 到过 **41.5–52.4**，
   静态锁屏时是 0–10（用户态本来就不出帧）。
-- **未达标**：目标 60 fps；`coalesced` 在同一窗口还有 ~10/s，说明到达 submit 的帧被合并；
-  亮度/唤醒未解决（见 §7 P0，已确认走 DCS 而不是 WLED）。
-- **不可用**：`0272` 双 VIG 乒乓——`sweet_scanout.c` 里 `sc.pp` 已强制 `false`，原因见 §7 P1。
+- **P0 未达标**：60 fps 稳态和动态黑块仍未解决；近期窗口没有证明持续 60 fps。DCS `0x51` 硬件写入及可见亮度变化已确认；滑块接线/唤醒恢复属于 P1 待办。
+- **双 VIG 关闭**：`sweet_scanout.c` 中 `sc.pp` 强制为 `false`；保留原因与重新评估条件见 §7 双 SSPP 状态。
 
 **上机实测（内核 `3ca6b55`，2026-11-13，滑动中）—— 0275 + 0277 生效**
 
@@ -39,69 +47,14 @@ sec  swaps  coal  frames  latch  decline  latchw
  15    102     4      99     91        0       0
 ```
 
-结论：`latchw` 全 0 说明 work-loop 上的 25 ms 忙等已消失；活跃秒的 `swaps` 能到 76–102，
-`latch` 紧随其后（差值是仍在管道里的 1–2 帧），**单管已经不再是瓶颈**，链路跟的是
-CoreAnimation 的产帧速度。剩下 8% 的 `frames - latched` 是被新帧替换掉的，
-4.5% 的 `declines` 是回落 CPU 拷贝。
+结论（仅限该历史窗口）：`latchw` 全 0 说明 work-loop 上的 25 ms 忙等已消失；部分活跃秒的 `swaps` 达到 76–102，`latch` 紧随其后。该样本证明单管有瞬时超过 60 的能力，不证明稳态 60 fps，也未解决观感卡顿/黑块。它不能单独证明 CA 一定是当前限制，也不能据此断言双 pipe 对目标无用。
 
-因此双 pipe 乒乓（0272）**不再是达到 60 fps 的必要条件**，优先级应下调为「减少被替换的帧」，
-而不是「解决卡顿」。
+**历史诊断结论（勿再当作黑块根因）**
 
-**同一轮上机的新发现：观感仍然卡，且渲染时黑色块闪现——瓶颈不在显示路径。**
-
-用户实机反馈：帧率数字上去了，但滑动依然卡顿，并且画面有黑色矩形块闪现（项目一开始就有）。
-同一份日志里出现的是 GPU 侧的证据：
-
-```
-SWEET GPU: wait timed out: CP RPTR 4752 WPTR 5320 SQE_CNTL 0x1 STATUS_1 0x8103471e
-          RBBM_STATUS 0xef15f5 HW_FAULT 0 CP_IRQ 0 PROTECT 0 IB1 0817c0000 rem 0
-SWEET GPU: wait timed out: CP RPTR 5424 WPTR 5661 ...
-gpu_hold_timeouts=18
-```
-
-`WPTR > RPTR` 且 `rem 0` 说明命令已经推进到环形缓冲里但没被消费完，等待超时。这直接解释两件事：
-
-1. **卡顿**：`0229` 的门控在 GPU 没完成前把 swap 最多压 50 ms（`gpu_hold_timeouts` 就是在数这个），
-   观感是延迟而不是帧率——所以计数器显示 55–60 fps，手却觉得卡。
-2. **黑块**：GPU 没画完就交帧，被扫描的那块内存还是空的/旧的，表现为黑色矩形。
-
-**已排除：不是 GPU 频率档位不够，而是 boost 上限设太低。**
-
-| 引导参数 | 实际档位 | 黑块 |
-|---|---|---|
-| `sweetgpufreq=g`（默认） | boost 只到 3 = 427 MHz | 有 |
-| `sweetgpufreq=5` | **落到 level 1 = 257 MHz**（数字参数并未锁到 N） | **明显更多** |
-| `sweetgpufreq=g sweetgpuboost=5` | 可到 5 = **585 MHz** | 待用户确认 |
-
-`a630_boost_level` 默认 3（`0188`），所以调速器再忙也只抬到 427 MHz。把它抬到 5 后
-`kern.sweet_gpu` 能看到 `level=5 mhz=585`，且同一窗口内 `gpu_hold_timeouts` 不再增长
-（4 → 4），`submits_100ms` 增长变慢（3 → 1）。
-
-注意 `sweetgpufreq=N`（数字）**不生效**：解析里设了 `a630_level`，但固定模式随后又回到最低档，
-实测 `=5` 得到 257 MHz，比调速器还差。要用 `sweetgpuboost=N` 配 `sweetgpufreq=g`。
-
-**已排除：`SMMU CB1 FSR 0x400` 不是运行时故障（2026-11-13 修正）**
-
-之前把这条当成根因是推断过度了。`sweet_gpu_submit()` 里写得很清楚：
-
-```c
-uint32_t fsr = gpu_rd(b, SMMU_CB_FSR);
-if (fsr & 0xc00001feu) { (void)sweet_gpu_check_fault(); return 0; }
-if (fsr) { gpu_wr(b, SMMU_CB_FSR, fsr); /* stale status bits (0x400 from boot) */ }
-```
-
-`0x400` 是**开机残留**，每次提交都会被清掉；配套的 `FAR 0x12de541f4ff28`（49 位）
-也是启动时留下的垃圾值，不是运行时访问。所以不要拿它当线索。
-
-**仍然成立的现象：CP 不排空环形缓冲。**
-
-```
-SWEET GPU: wait timed out: GX gdscr 0xf8222800 ... submitted 262 completed 210 soft WPTR 5320
-SWEET GPU: wait timed out: CP RPTR 4752 WPTR 5320 SQE_CNTL 0x1 ... HW_FAULT 0 CP_IRQ 0 ... rem 0
-```
-
-`WPTR 5320 - RPTR 4752 = 568` dword 卡住，`HW_FAULT 0`、`CP_IRQ 0` —— 是**卡住**而不是报错。
-后果仍然是黑块（没画完的帧被扫到）与卡顿（客户端 `waitFence` 只能等超时）。
+- 某次 GPU 日志出现 CP ring timeout（`WPTR > RPTR`、`HW_FAULT=0`）；说明该区间 GPU queue 未排空，但后续 `0279` 只在少数 swap 超时、`0281` fresh-fence wait 立即通过，且 `sweetfb_scanout=0` 仍有黑块。该 timeout 不能解释持续黑块或卡顿，遇到时作为独立 GPU 健康问题处理。
+- GPU OPP 参数：`sweetgpufreq=5` 实际落到 level 1/257 MHz，不是锁 5；`sweetgpufreq=g sweetgpuboost=5` 可达 level 5/585 MHz。该参数解析事实有效，但历史主观黑块变化没有严格同场景对照，不能据此归因频率。
+- SMMU CB1 FSR `0x400` 与 49 位 FAR 是启动残留；submit 路径清 stale status，不能作为运行时 fault 根因。
+- `0278` IB 地址检查为只报不改，历史日志没有证实越界 IB 是黑块原因。
 
 ### 关键否证：黑块与「卡」都和直扫无关（2026-11-13）
 
@@ -126,7 +79,7 @@ id   swap_us  scan_us  latch_us  done_us  wcall_us  wret_us
 不要再沿这条线加补丁。剩余问题（黑块 + 卡）在上游：CoreAnimation 交出来的内容本身，
 或 iOS 侧合成/渲染能力。
 
-### 已实测排除的两条（2026-11-13，内核 `4e0a054`）
+### 实测排除的候选解释（2026-11-13，内核 `4e0a054`）
 
 用户描述最终确定为「**可移动的黑块**」（随内容一起移动，属帧内容的一部分）。
 
@@ -136,12 +89,7 @@ id   swap_us  scan_us  latch_us  done_us  wcall_us  wret_us
 | 面板读到被改映射的 IOVA 槽位 | `0280` 钉住最近两次 IOVA | **否定**：黑块依旧，`scanout_declines` 29→78（钉住使可用槽位变少，多余帧走拷贝） |
 | GPU 超时后放行未完成帧 | `0279` 超时改为丢帧 | **比例不足**：420 swap 中仅 4 次，解释不了持续可见的黑块 |
 
-**尚未做过的唯一二分实验**：把直扫整个关掉（`sweetfb_scanout=0`，走 CPU 拷贝路径）。
-- 黑块消失 → 问题在直扫路径（DPU 取数/映射），继续在这个方向挖
-- 黑块仍在 → 与直扫无关，在图层的合成/拷贝路径（多图层、单层假设、缓存），
-  需要转去看 `zcPresent` 的多图层处理与 `0227` 空 swap 填黑
-
-这个实验之前被用户否过一次（当时表现为性能降级），但现在是唯一能把问题空间对半切开的动作。
+**该二分实验后来已做**：`sweetfb_scanout=0`（CPU copy）下黑块仍在，用户也反馈直扫开关不改变卡顿手感。因此伪影不能归因于 raphael stage-1 IOVA/单 VIG0 直扫实现；接下来应检查 CA/Metal 输出内容与 panel/DSI 更新时序，不能再把“开关 scanout”列作待做实验。
 
 ### 用户实拍：不是随机黑块，是会往下走的水平接缝
 
@@ -172,30 +120,11 @@ id   swap_us  scan_us  latch_us  done_us  wcall_us  wret_us
 若确认是带宽，可行的方向（按代价排序）：启用 DSC 压缩（ABL 若已开则无需做）、降低像素格式
 （如 RGB565 减半）、或接受 ≤面板实际上限的刷新率。**不能靠改提交率掩盖**。
 
-### 决定性证据：帧数据本身没有黑块（2026-11-13）
+### 历史无效截图与 IOVA 假设（已否证，2026-11-13）
 
-用内置截图抓 DPU 正在扫描的那块内存（`kern.sweet_fb_shot`，`sweet_fb_shot_copy()` 读的是
-`sweet_surface_copy(fShotId)` 的 `kernelAddress() + offset`，也就是 DPU 实际取数的那块 IOSurface，
-不是我们自己的画布）：
+最初 `kern.sweet_fb_shot` 按 `fShotId` 抓最新提交 surface，并据一张静态截图的 `dark=0` 推断 panel 所见帧干净；这不是可靠的 latch 对齐证据。之后 `0282` 改为捕获 `fScanoutPin[0]` 指向的 latched surface，修复借用引用释放问题；同时确认静态画面无法判断动态伪影。
 
-```
-375x812 (= 1125/3 x 2436/3)，dark=0 (0.0%)
-```
-
-**帧数据是干净的，屏幕上却有黑块**，所以伪影产生在「DPU 取数 → 面板」之间，不在合成/拷贝里。
-这把范围收到三种可能，按可能性排序：
-
-1. **扫描用的 IOVA 槽位在 DPU 还没读完时就被改映射了。** `scanoutIova()` 只保护
-   「surface 仍在 `fZcHeld[]` 里」的槽位；一旦 `zcPoll()` 释放了它，槽位立刻可以被新 surface
-   复用（`sweet_scanout_unmap()` + 重映射）。DPU 若仍在本帧内读那个 IOVA，就会读到**别的
-   surface 的物理页**——内容可能正好是空的，表现为闪现的黑矩形。这完全解释「帧数据干净但屏幕有黑块」。
-   修法：槽位退休要以**下一次 latch** 为准，而不是以 hold 释放为准；至少把最近两次提交用过的
-   槽位钉住（4 个槽位里留 2 个），或在 unmap 前确认该槽位已不是当前 `fLastFlush` 的目标。
-2. DPU/DSI 侧的 underrun（command mode + tear check 时序）。
-3. 面板自刷新把旧内容顶出来。
-
-下一步优先验证 1：它是唯一能同时解释「黑块闪现」「帧率正常」「帧数据干净」三项的机制，
-而且改动局限在 `scanoutIova()` 的槽位复用条件，不需要动 GPU 或 DSI。
+据此产生的“DPU 仍读已重映射 IOVA”假设由 `0280` pin 最近两个 IOVA 实机测试，黑块仍在且 CPU-copy decline 增多，未获支持。它不再是优先根因。当前更可靠的事实是：CPU-copy 路径也有黑块、用户报告直扫开关不改变手感；普通逐帧静态截图也不能代替同步触控、GPU completion、flush/latch 的时间线。
 
 **可疑点：IB 地址没有范围校验。** `sweet_gpu_submit()` 把客户端给的 IOVA 直接写成环形缓冲里的
 两个 dword：
@@ -211,7 +140,7 @@ raphael 的 GPU VA 窗口是 `[GVM_BASE, GVM_END) = [0x80000000, 0x100000000)`�
 `0278` 先加了**只报不改**的校验：越界或非页对齐的 IB 地址按不同值各打一次，带 seqno，
 提交行为完全不变。下一次上机若打出这条，就等于把坏地址锁到了具体调用点。
 
-所以下一步不该继续调显示，而应该查 GPU 环形缓冲的停滞：
+历史上曾建议优先查 GPU ring/fence，但当前证据没有把它确认为黑块根因。若重新调查 GPU queue，应作为独立性能问题验证，不能与黑块因果混写。原建议为：
 `sweet_a630.c` 的提交/完成推进、`sweet_gpu_fence_snapshot()` 的粒度（全局 vs 每帧）、
 以及 `0229` 门控是否在等一个不相干的 GPU 工作。
 
@@ -224,13 +153,12 @@ copy_frames=3 latch_waits=42 vsync_s=58.36 swapsync=0
 gpu submitted=22945 completed=22945 hangs=0
 ```
 
-最近一次构建（内核 `3ca6b55`，2026-11-13，**未上机**）：CI `43416181039` success
-（第一次跑被 macOS runner 抢占失败，`gh run rerun` 后通过），`errors.txt` 空。两个镜像已打好：
+历史构建（内核 `3ca6b55`，2026-11-13）：CI `43416181039` success（第一次跑被 macOS runner 抢占失败，`gh run rerun` 后通过），`errors.txt` 空；该内核已用于单 VIG0/0275/0277 实机验证，不是当前最新镜像：
 
 | 镜像 | 用途 | sha256 |
 |---|---|---|
-| `validation-20261113/3ca6b55/boot-3ca6b55.img` | **推荐**：单管 + `0275` 退休修复 + `0277` 直扫计数 | `43da833a…390093d2` |
-| `validation-20261113/3ca6b55/boot-3ca6b55-dcs.img` | 同上，外加 `raphael_dcs=1`，可测 DCS 亮度 | `d2d0b834…7ebee466` |
+| `validation-20261113/3ca6b55/boot-3ca6b55.img` | 单管 + `0275` 退休修复 + `0277` 直扫计数，已上机验证 | `43da833a…390093d2` |
+| `validation-20261113/3ca6b55/boot-3ca6b55-dcs.img` | 同上，外加 `raphael_dcs=1`，用于 DCS 亮度验证 | `d2d0b834…7ebee466` |
 
 DCS 版为塞进 298 字符 args 上限去掉了 `sweetfb_statlog=1`（只影响周期 IOLog，
 `kern.sweet_fb` sysctl 不受影响）。
@@ -280,12 +208,12 @@ DCS 版为塞进 298 字符 args 上限去掉了 `sweetfb_statlog=1`（只影响
 | `0269-sweet-fb-swapwait-nolatch.patch` | `swapWaitInner()`：`fLastFlush==0`（没有任何帧交给 MDP）直接算完成，避免冻屏 |
 | `0270-sweet-fb-scanout-perf-and-off.patch` | ① GPU 帧不再做 10.9 MB 缓存清理；② 熄屏时先把管道切回面板内存，切成功才释放 surface hold |
 | `0271-sweet-fb-swapwait-at-submit.patch` | ① scanout 模式下 SwapWait 提交即答复（省 9.9 ms/帧）；② `sc_flush_idle` 最多等 2 ms，pending flush 由新写入覆盖（省 16.2 ms/帧） |
-| `0275-scanout-retire-before-submit.patch` | **本文件当前唯一在用的性能修复**：提交前退休已 latch 帧 + 容量预检（去掉 25 ms work-loop 忙等）；映射/清 cache 前 hold surface，失败撤销 |
-| `0272`（在 `sweet_scanout.c` 内，**默认关闭**） | VIG0/VIG1 乒乓骨架，`sc.pp = false`，见 §7 P1 |
+| `0275-scanout-retire-before-submit.patch` | **关键性能修复（已在当前补丁系列保留）**：提交前退休已 latch 帧 + 容量预检（去掉 25 ms work-loop 忙等）；映射/清 cache 前 hold surface，失败撤销 |
+| `0272`（在 `sweet_scanout.c` 内，**默认关闭**） | VIG0/VIG1 乒乓骨架，`sc.pp = false`；当前无证据证明它能解决用户伪影，见 §7 双 SSPP 状态 |
 | `0137-beryllium-reboot-mode.patch`（改动） | 把 reboot-to-bootloader 开放到 raphael（PM8150 PON spare + IMEM + PSCI fallback），用于自愈循环 |
 
 > **已删除**：`0273-raphael-pm8150l-wled-read.patch`。它给 raphael 开 SID 5 的 WLED 读白名单，
-> 但亮度实际走 DSI DCS（§7 P0），写了也点不亮，且会把后来人引到错误方向。
+> 但亮度实际走 DSI DCS（§7 P1），写了也点不亮，且会把后来人引到错误方向。
 
 ### 工具 / 资料
 
@@ -391,10 +319,7 @@ ssh ... 'sysctl -w kern.sweet_reboot_mode=bootloader; /var/jb/usr/sbin/reboot'
 
 ## 7. 未解决 / 下一步（按优先级）
 
-> 并行会话已在 `1944d59` 落地 **0272：VIG0/VIG1 乒乓**（`sweet_scanout.c` +156 行）。若你接手时
-> 已在跑，先复测 §0 的 fps/latch 数字再看下面两条。
-
-### P0 背光与唤醒（用户最直接的手感问题）
+### P1 背光与唤醒
 现象：熄屏要按好几次电源；`SWEET FB: backlight fade: cannot read WLED string 0 brightness; pixel fallback`。
 
 **结论已改（2026-11-13）：raphael 的 AMOLED 亮度不走 WLED，走 DSI DCS。** 依据（Xiaomi
@@ -415,12 +340,7 @@ PM8150L 的 `wled@d800`（usid 5）**确实存在且被 raphael 板级 DTS 打�
 `sp_write_allowed` / `SWEET_WLED_SID` 也回到 beryllium-only。原因是加 SID 5 只能让
 `blInit()` 读到寄存器，写路径仍被 beryllium 条件挡住，`fBlOK` 还是 false，对亮度零作用。
 
-**下一步**：按 DCS 实现亮度。SM8150 DSI0 = `0x0ae94000`/`0x400`，下游 `compatible` 是
-`qcom,dsi-ctrl-hw-v2.3`，对应 `dsi_ctrl_hw_cmn_kickoff_fifo_command`（无需 cmd-DMA 分配）。
-包头按下游 `dsi_ctrl.c`：长写 DT `0x39`、word count 3、`last` bit7、payload 补 `0xFF`；
-`0x51` 的 payload 是 `51 hi lo`。**先只读**：确认 controller idle/clock/ownership，再串行发
-一次小幅亮度写并用 `0x52` 回读。不要在缺少 power/ownership 的情况下裸读 MMIO——
-无时钟时 load 可能 stall 或 abort。
+**已完成硬件通路；后续工作**：不要再实现 WLED 或另写 DCS raw MMIO。DCS `0x51` 已由下方补丁安全发送并在实机得到 `last_error=0`。剩余验证是把 `kern.raphael_dcs_level` 接到系统亮度 UI、肉眼确认亮度有变化，并单独验证熄屏/唤醒恢复。若需要扩大协议（例如 `0x52` 回读或 HS/LPM 状态机），先查明现有写入对面板的可见效果再动。
 
 **已实现（`0f90a60` + `691a02f`）：`bsd/dev/raphael_dsi.c`，默认关闭**
 
@@ -466,16 +386,7 @@ sysctl -w kern.raphael_dcs_level=120
 写入后显示继续正常扫描（`swaps` 834→872、`scanout_latched` 692→718 持续增长），
 没有 panic、没有 SMC/DSI 错误、没有丢帧。**即 DCS 0x51 到达了控制器且被接受。**
 
-待确认：面板亮度是否真的跟着变（需要肉眼确认，见下）。若面板忽略该包，
-最可能的原因是 `0x51` 在 `dsi_panel` 侧要求先退出 LPM/进入 HS，或需要
-`dsi_ctrl` 的命令状态机而不是裸 FIFO。
-
-**测试顺序**（手机在 fastboot 时）：
-1. `kern.sweet_fb` 先确认 `mode=direct`、有画面（DSI 必须在被驱动状态）；
-2. 读 `kern.raphael_dsi` 记录 `status`/`hw_version`（控制器不提供可信版本号，
-   下游是从 DT compatible 选 v2.3，所以版本只作记录）；
-3. 写 `kern.raphael_dcs_level=1023`（中途值），观察画面亮度与 `last_error`；
-4. 成功再试 2 与 2047 两端，确认 `0x52` 回读需要另加（当前未实现回读）。
+**用户已确认亮度可见变化**，`last_error=0` 且写入后显示持续扫描。硬件发送路径达标；仍未完成的是把 sysctl 接入系统亮度滑块，以及熄屏/唤醒恢复验证。`0x52` 回读仅在需要独立面板寄存器证据时再实现，不是当前亮度写入的阻塞项。
 
 > 注意：`COMMAND_MODE_DMA_CTRL` 在发送窗口内被切到 EMBEDDED 模式，若此时正好有一帧
 > command-mode DMA 在排队，可能出现一帧闪烁后自恢复。这是 opt-in 的理由，也是先测中间值
@@ -485,10 +396,13 @@ sysctl -w kern.raphael_dcs_level=120
 它能编译，但等于让 root 直接对未声明 ownership 的 DSI 发 MMIO load，
 无硬件证据证明安全返回，故弃用；现在的实现只在显式 opt-in 下动，且带 idle 前置与超时。
 
-### P1 串行等待（"拷贝已去掉但还是卡"的真因）
-实测每帧平均：**latch 等待 16.2 ms + SwapWait 9.9 ms**（`pace` 行 `latch_us=1623225`、
-`swap_wait_us=992400` 是 ×100 的定点数，即 16.23 ms / 9.92 ms），一帧 33 ms → ~30 fps，
-但端到端延迟 40–60 ms，所以滑动手感仍然差。`copy=0` 说明不是带宽/拷贝问题，是**串行**：
+### P0 显示帧率、黑块与 scanout 退化
+
+当前确认：单 VIG0 direct scanout 能正常显示；0271/0275 降低了早期 latch/SwapWait 串行开销，且锁存超时低。近期 late-present 采样均值 38.23 swaps/s（峰值 54.17），当前无延迟镜像最近单秒样本 33.73 swaps/s；这些窗口未严格控制同一手势，不能当作稳态基准，未证明持续 60 fps。近期 `scanout_declines` 增长，下一项低风险诊断是 opt-in `sweetfb_holdflush=1`：当 VIG0 flush 超过现有 2 ms 窗口仍 pending 时返回 `EBUSY`，让 0275 回退此帧到 CPU copy，而不是覆盖 pending flush。它可能增加 copy/延迟，只用于判断“覆盖未 latch flush”对伪影/回退的影响，不预设为性能修复。
+
+用户已确认 `sweetfb_scanout=0` 下黑块仍在、开关 direct scanout 对手感影响不明显。`0280` IOVA pin、`0279` timeout-drop 与 `0281` fresh-fence wait 均未解决黑块；`0283` late-present 尚无用户视觉改善证据，保持 opt-in。根因尚未确定。公开 UniXNU GPU/display 指南支持将同一触控区间的 GPU commit/completion、scanout submit、flush/latch 对齐；当前全局 fence snapshot 在 `0281` 中立即通过（`scanout_us_max≈624 µs`），可能没有覆盖 CA 后续才提交的绘制。
+
+**历史串行基线**：早期实测每帧平均 **latch 等待 16.2 ms + SwapWait 9.9 ms**（`pace` 行 `latch_us=1623225`、`swap_wait_us=992400` 是 ×100 的定点数），当时约 30 fps、端到端延迟 40–60 ms。0271/0275 已修正该特定等待路径；这些旧数字不代表当前稳态性能。
 
 1. `sweet_scanout_show()` 里的 `sc_flush_idle()`：同一个 SSPP 不能有两个未 latch 的 flush，
    所以每个 swap 都要等上一帧被面板吸收（一个 60 Hz 帧 = 16.2 ms）。
@@ -513,9 +427,8 @@ pending 位重新置起，`latchedNow()` 立刻变 false，于是上一帧其实
 `show()` 的非 0 返回全部发生在写 `SRC0`/`CTL_FLUSH` 之前，所以「拒绝时没有 MMIO 拥有这个引用」成立——
 这条不变量是 0275 提前释放的依据，改 `show()` 时必须保持。
 
-**测量盲点已修（`0277`，`3ca6b55`）**：`zcPresent()` 的 scanout 分支提前 `return true`，
-绕过了 `fSt.zc`/`zcAbs`/`fZcFrames`，所以直扫以前在 `kern.sweet_fb` 里完全不可见。现在有四个
-专用字段（在同一行 `kern.sweet_fb` 末尾）：
+**历史诊断能力（`0277`，`3ca6b55`）**：`zcPresent()` 的 scanout 分支提前 `return true`，
+绕过了 `fSt.zc`/`zcAbs`/`fZcFrames`；0277 加入专用字段（`kern.sweet_fb` 行尾），这些计数仍用于诊断，但不能单独解释黑块根因：
 
 | 字段 | 含义 |
 |---|---|
@@ -524,22 +437,13 @@ pending 位重新置起，`latchedNow()` 立刻变 false，于是上一帧其实
 | `scanout_latched` | `zcPoll()` 看到 flush 位清 0（**真的到了面板**） |
 | `scanout_us` / `scanout_us_max` | 进入 `scanoutPresent()` 的耗时均值 / 窗口内峰值 |
 
-判读方法：
+**正确使用边界**：`scanout_frames - scanout_latched` 只表示提交与观察到 latch 的累计差，不等价于当前硬件队列深度；flush 位可能被新提交复用。`scanout_declines` 表示回 CPU copy 的次数，需结合 decline reason、同窗 `copy_frames` 与帧提交/latch 时间线解释。`scanout_us` 只测 CPU submit path，不是 GPU 渲染时长。不要仅凭 `scanout_latched < scanout_frames` 推断单 SSPP 替换是唯一瓶颈或直接启用双 pipe。
 
-- `scanout_frames - scanout_latched` 持续增长 → 有帧提交了但没被退休，问题在管道或 hold。
-- `scanout_latched / win_ms` 接近 59 → 管道跟得上，瓶颈在 CoreAnimation 产帧（GPU/fence）。
-- `scanout_latched` 明显低于 `scanout_frames` 而 `declines` 很小 → 单 pipe 在替换 pending 帧，
-  这正是双 pipe 想解决的那一段。
-- `scanout_us_max` 首窗口会有一次 ~100 ms 的离群值，那是首帧 `sweet_scanout_init()` 的试 flush，
-  不是稳态。
+比较帧率时必须用同一动态操作、同一时间窗的 per-second 计数；静态桌面/锁屏的 0–10 swaps/s 不是性能指标。`zc_s` / `zc_us` 只代表 low-pool 零拷贝，不能衡量 direct scanout。
 
-另外仍要看：`swaps_s`（同场景滑动）、`coalesced`、以及日志里
-`MDP flush ... did not latch within 25 ms` 是否消失。`zc_s` / `zc_us` 依旧只代表 low-pool
-零拷贝，**不要**拿它衡量直扫。
+**实验分支：双 SSPP 乒乓，保留但关闭**
 
-**剩下的一条：双 SSPP 乒乓已实现但默认关闭（`b7908b3`）**
-`1944d59`/`d6156fa`/`f54a0a3` 落地了 0272，但**上机不可用**，`sweet_scanout.c` 里
-`sc.pp` 已强制为 `false`。三个独立缺陷，缺一不可开工：
+`0272` 已有 VIG0/VIG1 骨架，当前 `sweet_scanout.c` 中 `sc.pp=false`。不要直接打开；若未来证据表明单管 submit/latch 是瓶颈，必须先解决以下硬件与所有权条件：
 
 1. **VIG1 的取数配置从未初始化**。`show()` 只写 `SRC0_ADDR/YSTRIDE/SRC_SIZE/XY/OUT_*` 和
    QSEED，从不写 `SRC_FORMAT (+0x30)`、`UNPACK_PATTERN (+0x34)`、`SRC_OP_MODE (+0x38)`。
@@ -559,30 +463,23 @@ pending 位重新置起，`latchedNow()` 立刻变 false，于是上一帧其实
 （`swaps` 几十次/分钟），抓 170 s 可能一个 swap 都没有。要测延迟，必须先让界面动起来
 （滑动、开 app、或切到动态壁纸），否则日志里全是 0。
 
-### P2 多图层（动态岛 / 状态栏叠加）
-现在只接受「单图层、整 canvas」的帧：`zcPresent()` 遇到多个置位图层直接
-`zcDecline(1, "several layers are composed by the copy path")` 退回 CPU 拷贝。
+### P2 多图层与动态岛 UI
+
+此前一次 MobileGestalt `CacheExtra[DeviceSupportsDynamicIsland]` 读取返回 `True`；最近一次 `dynamic-island.sh show` 因 cache missing 失败，因此当前 capability 值未核验。即使为 `True` 也只是 UI capability，不是 SpringBoard 已显示动态岛的视觉确认，也不代表 DPU 多图层完成。
+
+直扫当前只接受「单图层、整 canvas」帧：多个 layer 会退回 CPU copy。已有滑动日志记录的是 layer 0 单层整 canvas，未证明桌面编辑操作确实提交多层；旧 copy path 逐层覆盖写而非 alpha blend。后续多图层工作应先取得目标场景的真实 layer ID/rect/format/alpha 记录，再决定 CPU 合成修复还是硬件 blend，不假设双 pipe 是必然前置。
 
 **注意这和「动态岛」不是同一件事**：
-- 动态岛的 UI 是 SpringBoard 用 MobileGestalt 的 `DeviceSupportsDynamicIsland` 决定画不画的，
-  与 DPU 图层数无关；打开它只需要改 MobileGestalt 缓存（`tools/raphael/dynamic-island.sh on`），
-  不需要改 scanout。
-- 真正的 P2 是**硬件合成多图层**：要多一个 SSPP（VIG1）+ LM blend stage，或走 multirect。
-  它和 §7 P1 的双 pipe 是同一批前置条件（VIG1 取数配置、`CONST_ALPHA`、每 pipe 独立 hold），
-  所以**必须先把 P1 那三条修完**，否则就是在放不安全的双 pipe 上再叠一层。
+- 动态岛 UI 由 SpringBoard 根据 MobileGestalt `DeviceSupportsDynamicIsland` 决定，与 DPU 图层数无关；cache 当前需恢复后再只读验证，勿在 cache 缺失时盲目写入。
+- 硬件多层是独立目标：需要多 SSPP + LM blend 或 multirect。只有确认真实 layer 负载后，再基于该配置设计 pipe fetch、alpha 与 surface lifetime；不为 Dynamic Island capability 本身启用多层 scanout。
 
 参考：andromeda `0207` 也是单层限制；本仓 `0211/0213` 有 HUD 图层的 blend stage 做法
 （`SWEET_MDP_LM_BLEND0 0x20`、`BLEND_STRIDE 0x18`、FG_ALPHA/BG_ALPHA/OP `0x602`）。
 
-### P3 映射槽与内存回收
-`fScanoutMaps[]` 只做 LRU 淘汰、不做超时回收；熄屏 `zcReleaseAll()` 后映射仍在（最多 4 个
-10.96 MB 的映射）。长期跑要加回收。
-
-### P4 其它
-- `kern.sweet_fb` 的 `zc_frames` 不统计扫描路径（那是 low-pool 的计数器），建议加
-  `scanout_frames` 计数，便于回归。
-- `fScanoutRefused` 只有自增没有输出。
-- 0127 的 low pool 仍是 beryllium 硬编码；与 raphael 无关，可留作 beryllium 用。
+### 次要维护项
+- `fScanoutMaps[]` 使用 LRU 淘汰；熄屏时映射可能保留到当前启动结束（最多 4 个约 10.96 MB 的映射）。目前不是已证实用户故障；若要回收，需确保 DPU 已不再读取对应 IOVA 后再 unmap。
+- `fScanoutRefused` 目前未单独导出；`scanout_declines` 已由 0277 覆盖常规失败计数，除非需要逐类拒绝统计，否则不单独加接口。
+- `0127` low pool 的 beryllium 硬编码与 raphael direct scanout 无关，保留为跨机型历史提示。
 
 ---
 
@@ -636,7 +533,7 @@ print('mismatched hunks:', bad)
 
 | 来源 | 看什么 |
 |---|---|
-| **MiCode/Xiaomi_Kernel_OpenSource** `raphael-p-oss` @ `663db50e195a8a54c8565ac4ab0c6d9ba7d80db0` | 亮度唯一权威：`xiaomi-sm8150-common.dtsi:329-337`（`bl_ctrl_dcs` 2..2047）、`dsi-panel-ss-fhd-ea8076-cmd.dtsi`（`bl-dcs-type-ss`）、`dsi_panel.c:746-755`（WLED/DCS 选择）、`dsi_ctrl_hw_cmn.c:705`（v2.3 FIFO 发包）、`dsi_ctrl.c:942-983,1161-1178`（包头/padding/last） |
+| **MiCode/Xiaomi_Kernel_OpenSource** `raphael-p-oss` @ `663db50e195a8a54c8565ac4ab0c6d9ba7d80db0` | 主要设备级依据：`xiaomi-sm8150-common.dtsi:329-337`（`bl_ctrl_dcs` 2..2047）、`dsi-panel-ss-fhd-ea8076-cmd.dtsi`（`bl-dcs-type-ss`）、`dsi_panel.c:746-755`（WLED/DCS 选择）、`dsi_ctrl_hw_cmn.c:705`（v2.3 FIFO 发包）、`dsi_ctrl.c:942-983,1161-1178`（包头/padding/last） |
 | **Linux** `drivers/gpu/drm/panel/panel-samsung-ams639rq08.c` | DCS `0x51`/`0x52` 用法、max 2047 / init 1023、亮度前后临时退 LPM |
 | **Linux** `drivers/gpu/drm/msm/disp/dpu1/dpu_hw_lm.c` | `setup_blend_config_combined_alpha`：`const_alpha = (bg&0xff) \| ((fg&0xff)<<16)` —— 双 pipe 重开时必须按这个校验 |
 | **Linux** `dpu_hw_sspp.c` / `catalog/dpu_5_0_sm8150.h` | VIG 取数配置（`SRC_FORMAT`/`UNPACK`/`OP_MODE`）、VIG0 `0x4000`→本板 `+0x1000`、VIG1 `0x6000`→`0x7000`、LM0 `0x44000`→`0x45000` |
@@ -654,7 +551,7 @@ print('mismatched hunks:', bad)
 - 补丁：`xnu/patches-11215/0268/0269/0270/0271/0275-*.patch`、`0137-beryllium-reboot-mode.patch`
 - 源码：`xnu/patches-11215/sweet_scanout.c`、`sweet_scanout.h`、`0268-stage-sweet-scanout.sh`
 - 工具：`tools/raphael/check-patch-series.py`（改补丁后必跑）、`capfast.py`、`raphael-base.adt`、`pack-mdp-tests.sh`、`mkboot-raphael.sh`
-- 镜像：`ios16-reference/validation-20261112/b7908b3/boot-b7908b3.img`（当前最新，未上机）；`ios16-reference/ios18-image/boot-ios18-scanout.img`（旧）
-- 基线：`ios16-reference/validation-20261112/boot-0271-recovery.img`（0271 单管，已上机验证可显示）
+- 最近 A/B 镜像：`ios16-reference/validation-20261113/448fd78/boot-late.img`（0283 opt-in）与 `boot-base.img`（同 kernel、无 late-present）；细节见 `ios16-reference/validation-20261113/448fd78/retest/RESULTS.md`。当前手机运行 `boot-base.img` 对照参数。
+- 历史基线：`ios16-reference/validation-20261112/boot-0271-recovery.img`（0271 单管，已上机验证可显示）；不是当前构建。
 - 文档：`docs/FORK-SCAN-AND-BUGS.md`、`docs/HANDOVER-GPU-SCANOUT.md`（本文）
 - CI：`.github/workflows/xnu.yml`

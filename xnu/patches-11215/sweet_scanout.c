@@ -517,9 +517,19 @@ sc_tear_end(void)
 	sc_tear_active = false;
 }
 
+static bool sc_holdflush;
+
 static bool
 sc_flush_idle(uint32_t bits)
 {
+	static unsigned once;
+	if (__atomic_exchange_n(&once, 1u, __ATOMIC_ACQ_REL) == 0) {
+		uint32_t enabled = 0;
+		if (PE_parse_boot_argn("sweetfb_holdflush", &enabled, sizeof(enabled)) && enabled == 1) {
+			__atomic_store_n(&sc_holdflush, true, __ATOMIC_RELEASE);
+			printf(SC_TAG " hold pending flush: decline instead of replacing after 2 ms (diagnostic)\n");
+		}
+	}
 	for (unsigned i = 0; i < 8; i++) {
 		if ((mdp_rd(SC_CTL0 + CT_FLUSH) & bits) == 0) {
 			if (i != 0) {
@@ -528,6 +538,9 @@ sc_flush_idle(uint32_t bits)
 			return true;
 		}
 		sc_nap_us(250);
+	}
+	if (__atomic_load_n(&sc_holdflush, __ATOMIC_ACQUIRE)) {
+		return false;
 	}
 	sc.replaced++;
 	return true;
