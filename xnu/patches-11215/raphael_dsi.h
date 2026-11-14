@@ -7,10 +7,10 @@
  * dsi-panel-ss-fhd-ea8076-cmd.dtsi), and dsi_panel_set_backlight() only ever
  * calls the WLED path for a panel whose bl_config.type is WLED.
  *
- * Everything here is opt-in: without the boot argument raphael_dcs=1 the
- * module maps nothing, reads no register and writes no register. With it, the
- * read sysctl returns a snapshot and a write to raphael_dcs_level sends one
- * DCS 0x51 packet.
+ * On raphael the module is armed by default (raphael_dcs=0 turns it off):
+ * since 0284 the iOS brightness slider reaches the panel through it. On any
+ * other board it maps nothing and writes nothing. The read sysctl returns a
+ * snapshot; a write to raphael_dcs_level sends one DCS 0x51 packet.
  *
  * The packet layout and the FIFO sequence are from MiCode/Xiaomi_Kernel_
  * OpenSource raphael-p-oss @ 663db50e195a8a54c8565ac4ab0c6d9ba7d80db0:
@@ -103,7 +103,7 @@ raphael_dsi_pack_brightness(uint32_t level, uint32_t words[2])
 	return 0;
 }
 
-/* Boot argument raphael_dcs=1 was given and the controller is mapped. */
+/* Armed (raphael, unless raphael_dcs=0) and the controller is mapped. */
 bool raphael_dsi_available(void);
 
 /* Read-only snapshot of the controller registers, into TEXT. 0 on success. */

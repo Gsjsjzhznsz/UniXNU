@@ -1,0 +1,108 @@
+raphael: drive panel brightness from the iOS brightness slider (IOMFB selector 50)
+
+backboardd already asks the framebuffer for brightness: the iOS 18 USB log shows
+"SWEET FB: backboardd sel 50 in 2/0" -- IOMobileFramebuffer selector 50, the
+setBrightnessCorrection channel CoreBrightness uses -- but externalMethod() had no
+case for it, so the request was dropped (default:) and the panel never changed.
+
+The value is in 0..10000 units (ios-raphael patch 0100 caught backboardd sending
+10000, full, at boot; iOS 18 calls the same selector). The AMOLED takes DCS 0x51
+levels 4..2047, so map the range with the perceptual table from that patch rather
+than linearly -- the low third of the slider needs the small levels to be usable.
+The first value above the panel maximum proves the 0..10000 scale; a value that
+already fits 0..2047 is sent as a DCS level unchanged.
+
+The packet itself is raphael_dsi.c's (0276), so this patch adds no register code:
+selector 50 calls raphael_dsi_set_brightness(), which is inert unless the boot
+argument raphael_dcs=1 is given. The caller is a user-client thread, so the
+bounded IOSleep in the DCS idle wait is allowed here (it is not on the vsync
+timer). Each changed value is logged with the level and any error.
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 1b07788..9383738 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -46,6 +46,7 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+ extern "C" void sweet_busy_init(void);          /* iokit/Kernel/arm/SweetBusy.cpp (boot-arg sweetbusy=N) */
+ #include "../../../bsd/dev/sweet_board.h"
+ #include "../../../bsd/dev/sweet_spmi.h"
++#include "../../../bsd/dev/raphael_dsi.h"     /* bsd/dev/raphael_dsi.c (0284): DCS 0x51 brightness */
+ /* bsd/dev/sweet_scanout.c (patch 0268): the display reads the frames itself, no CPU copy. */
+ #include "sweet_scanout.h"
+ extern "C" int sweet_smmu_probe_sid(unsigned sid, unsigned level); /* bsd/dev/sweet_smmu.c, read only */
+@@ -144,6 +145,7 @@ enum {
+ 	kSweetFBGetID                   = 7,
+ 	kSweetFBGetDisplaySize          = 8,
+ 	kSweetFBRequestPowerChange      = 12,
++	kSweetFBSetBrightnessCorrection = 50,    /* 0284: CoreBrightness/backboardd brightness, 0..10000 */
+ 	kSweetFBIsMainDisplay           = 18,
+ 	kSweetFBGetDotPitch             = 28,
+ 	kSweetFBNotifications           = 72,
+@@ -4001,6 +4003,34 @@ IOMobileFramebufferUserClient::notify(uint32_t type, const uint64_t *values, uin
+ 	    kIOUserNotifyOptionCanDrop);
+ }
+ 
++/*
++ * 0284: the brightness channel iOS 18 uses. backboardd calls IOMobileFramebuffer selector 50
++ * ("setBrightnessCorrection") with the display brightness in 0..10000 units: the iOS 16 log of
++ * ios-raphael patch 0100 caught backboardd calling it with 10000 (full) at boot. The panel takes
++ * DCS 0x51 levels 4..2047 (qcom,mdss-brightness-max-level), so map the range with the perceptual
++ * table from that patch instead of linearly: the low third of the slider needs the small levels.
++ * The first value decides the range: anything above the panel maximum proves the 0..10000 scale;
++ * a value that already fits the panel maximum is taken as a DCS level, in case this build ever
++ * gets a backboardd that sends levels directly.
++ */
++static uint32_t
++sweetFbDcsLevel(uint32_t v)
++{
++	static const uint32_t units[] = { 0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000 };
++	static const uint32_t levels[] = { 4, 14, 40, 92, 180, 320, 530, 830, 1220, 1620, 2047 };
++	if (v >= 10000u) {
++		return RAPHAEL_DSI_LEVEL_MAX;
++	}
++	for (unsigned i = 1; i < sizeof(units) / sizeof(units[0]); i++) {
++		if (v <= units[i]) {
++			const uint32_t span = units[i] - units[i - 1];
++			const uint32_t off = v - units[i - 1];
++			return levels[i - 1] + (uint32_t)(((uint64_t)(levels[i] - levels[i - 1]) * off) / span);
++		}
++	}
++	return levels[0];
++}
++
+ static uint64_t sweet_fb_logged;        /* selectors already logged (< 64) */
+ 
+ IOReturn
+@@ -4106,6 +4136,32 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 			ret = fFB->swapWait((uint32_t)args->scalarInput[0]);   /* 0216: done = latched on the panel */
+ 		}
+ 		break;
++	case kSweetFBSetBrightnessCorrection:
++		/* 0284: the brightness slider. A DCS 0x51 packet goes out here, on the caller's thread (it may sleep). */
++		if (args->scalarInputCount >= 1 && sweet_board_raphael()) {
++			static uint32_t last_raw;
++			static int range;       /* 0: not seen yet, 10000: 0..10000 units, 2047: already a DCS level */
++			static unsigned writes, errors;
++			const uint32_t raw = (uint32_t)args->scalarInput[0];
++			if (raw > RAPHAEL_DSI_LEVEL_MAX && range != 10000) {
++				range = 10000;
++				IOLog("SWEET FB: brightness selector 50 speaks 0..10000 units (first value %u)\n", raw);
++			}
++			const uint32_t level = range == 10000
++			    ? sweetFbDcsLevel(raw > 10000u ? 10000u : raw)
++			    : (raw > RAPHAEL_DSI_LEVEL_MAX ? RAPHAEL_DSI_LEVEL_MAX : raw);
++			const int error = raphael_dsi_set_brightness(level);
++			writes++;
++			if (error != 0) {
++				errors++;
++			}
++			if (raw != last_raw || error != 0) {
++				last_raw = raw;
++				IOLog("SWEET FB: brightness %u -> DCS %u: %d (%u writes, %u errors)\n",
++				    raw, level, error, writes, errors);
++			}
++		}
++		break;
+ 	default:
+ 		break;
+ 	}

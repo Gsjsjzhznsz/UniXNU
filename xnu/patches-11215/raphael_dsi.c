@@ -2,9 +2,10 @@
  * raphael DSI0 DCS brightness. See raphael_dsi.h for the sources and for why
  * this is DCS and not the PM8150L WLED.
  *
- * Boot argument raphael_dcs=1 arms everything. Without it this file maps
- * nothing and touches no register: the image behaves exactly like one built
- * without this patch.
+ * On raphael it is armed by default: since 0284 the iOS brightness slider
+ * needs this path, and the write was verified on the phone (last_error=0,
+ * visible change). Boot argument raphael_dcs=0 turns it off; on any other
+ * board it stays inert (nothing mapped, no register touched).
  */
 #include <pexpert/arm64/board_config.h>
 #if defined(ARM64_BOARD_CONFIG_SWEET)
@@ -67,7 +68,13 @@ rd_check_armed(void)
 
 	if (__atomic_load_n(&once, __ATOMIC_ACQUIRE) == 0) {
 		__atomic_store_n(&once, 1u, __ATOMIC_RELEASE);
-		if (PE_parse_boot_argn(RDS_BOOTARG, &v, sizeof(v)) && v == 1) {
+		/*
+		 * 0284: raphael_dcs=0 disables; on raphael the default is on, because the
+		 * brightness slider (IOMFB selector 50) reaches DCS 0x51 only through this
+		 * module. Other boards never arm it, with or without the argument.
+		 */
+		if (sweet_board_raphael() &&
+		    (!PE_parse_boot_argn(RDS_BOOTARG, &v, sizeof(v)) || v != 0)) {
 			__atomic_store_n(&rd_armed, 1u, __ATOMIC_RELEASE);
 		}
 	}
@@ -291,9 +298,9 @@ raphael_dcs_level_sysctl SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_kern, OID_AUTO, raphael_dsi,
     CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
     raphael_dsi_sysctl, "A",
-    "Raphael DSI0 state; needs boot argument raphael_dcs=1");
+    "Raphael DSI0 state; raphael_dcs=0 turns the DCS path off");
 SYSCTL_PROC(_kern, OID_AUTO, raphael_dcs_level,
     CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED, 0, 0,
     raphael_dcs_level_sysctl, "I",
-    "Write 0..2047 to send one DCS 0x51 brightness write; needs raphael_dcs=1");
+    "Write 0..2047 to send one DCS 0x51 brightness write");
 #endif /* ARM64_BOARD_CONFIG_SWEET */

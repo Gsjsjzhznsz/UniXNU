@@ -398,7 +398,7 @@ sysctl -w kern.raphael_dcs_level=120
 
 ### P0 显示帧率、黑块与 scanout 退化
 
-当前确认：单 VIG0 direct scanout 能正常显示；0271/0275 降低了早期 latch/SwapWait 串行开销，且锁存超时低。近期 late-present 采样均值 38.23 swaps/s（峰值 54.17），当前无延迟镜像最近单秒样本 33.73 swaps/s；这些窗口未严格控制同一手势，不能当作稳态基准，未证明持续 60 fps。近期 `scanout_declines` 增长，下一项低风险诊断是 opt-in `sweetfb_holdflush=1`：当 VIG0 flush 超过现有 2 ms 窗口仍 pending 时返回 `EBUSY`，让 0275 回退此帧到 CPU copy，而不是覆盖 pending flush。它可能增加 copy/延迟，只用于判断“覆盖未 latch flush”对伪影/回退的影响，不预设为性能修复。
+当前确认：单 VIG0 direct scanout 能正常显示；0271/0275 降低了早期 latch/SwapWait 串行开销，且锁存超时低。近期 late-present 采样均值 38.23 swaps/s（峰值 54.17），当前无延迟镜像最近单秒样本 33.73 swaps/s；这些窗口未严格控制同一手势，不能当作稳态基准，未证明持续 60 fps。近期 `scanout_declines` 增长。opt-in `sweetfb_holdflush=1` 在 VIG0 flush 经过 2 ms 仍 pending 时返回 `EBUSY`，由 0275 回退到 CPU copy、不覆盖 pending 地址；这可能增加 copy/延迟，只是诊断，不预设为修复。严格分支前 8 次 decline 会输出 `SWEET SCANOUT: holdflush decline N`，且初始化成功时打印策略，便于从内核日志直接区分该原因与其他 fallback，不再扩展 stats sysctl ABI。
 
 用户已确认 `sweetfb_scanout=0` 下黑块仍在、开关 direct scanout 对手感影响不明显。`0280` IOVA pin、`0279` timeout-drop 与 `0281` fresh-fence wait 均未解决黑块；`0283` late-present 尚无用户视觉改善证据，保持 opt-in。根因尚未确定。公开 UniXNU GPU/display 指南支持将同一触控区间的 GPU commit/completion、scanout submit、flush/latch 对齐；当前全局 fence snapshot 在 `0281` 中立即通过（`scanout_us_max≈624 µs`），可能没有覆盖 CA 后续才提交的绘制。
 
