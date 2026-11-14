@@ -14,7 +14,7 @@
 - UniXNU [显示适配指南](https://unixnu.com/zh/porting/display)指出 compositor 可能在 GPU 命令完成前就提交 swap；安全的 direct scanout 必须等对应 GPU 写 fence 后再 flip，并分别测 GPU wait、flip 和 panel latch。它支持 fence handoff 的通用要求，但不是本机型的黑块根因证明。
 - UniXNU [GPU 适配指南](https://unixnu.com/zh/porting/gpu)建议把同一次触控对应的 command commit、GPU completion、显示 validation/fence wait/flip/latch 放在统一时间线上；[GPU 帧诊断指南](https://unixnu.com/zh/porting/gpu-diagnostics)列出了触控边界、render/encode/complete 线程采样、GPU pass、fence 和 display latch 的关联证据。
 - 本仓实测已否定“只把 SwapEnd 延后一帧就足以修复”的强结论：`0281` fresh-fence wait 的 `scanout_us_max` 仅约 624 µs，说明当时 fence snapshot 立即通过；late-present `0283` 的 15 秒窗口 `swaps_s` 均值 38.23（6.98–54.17），未证明 60 fps，用户可见效果/延迟尚无结论。保留 `0283` 为 opt-in，不宣称修复。
-- [本轮 late-present A/B 记录](../validation-20261113/448fd78/retest/RESULTS.md)中 20 帧截图证实画面在变化，但低分辨率静态像素检测不能替代对移动黑块的视觉判定。设备当前使用无 late-present 的对照镜像。
+- [holdflush 诊断记录](../validation-20261113/448fd78/retest-holdflush/RESULTS.md)和 [late-present A/B 记录](../validation-20261113/448fd78/retest/RESULTS.md)保留阶段证据。当前 strict-fallback logging 镜像确认了 pending VIG0 flush decline 实际触发，但没有用户视觉黑块改善结论。
 - Dynamic Island：此前通过 SSH 直接读到 MobileGestalt `CacheExtra[DeviceSupportsDynamicIsland]=True`；本次整理末尾复核时 `dynamic-island.sh show` 报 cache missing，因此该值只作为上轮历史读数，不宣称当前仍有效。即便为 `True` 也只证明能力 override，不证明 SpringBoard 已画出岛或 DPU 多图层。`usblink.sh` 默认 SSH key 回退已修复；cache 缺失时需等系统重新生成后再读，不要盲写。
 
 CoreAnimation 交出的 IOSurface 通过显示流自己的 stage-1 页表被 **VIG0** 直接读取，QSEED3 做
@@ -388,6 +388,52 @@ sysctl -w kern.raphael_dcs_level=120
 
 **用户已确认亮度可见变化**，`last_error=0` 且写入后显示持续扫描。硬件发送路径达标；仍未完成的是把 sysctl 接入系统亮度滑块，以及熄屏/唤醒恢复验证。`0x52` 回读仅在需要独立面板寄存器证据时再实现，不是当前亮度写入的阻塞项。
 
+**2026-11-15：滑块接线的现状（0284-0288，未完成）**
+
+`0284` 把 `IOMobileFramebufferUserClient` 的 selector 50（`setBrightnessCorrection`，0..10000）接到
+`raphael_dsi_set_brightness()`，并把 `raphael_dsi.c` 改为 raphael 默认武装（`raphael_dcs=0` 关）。iOS 18 的
+backboardd 确实会调用 selector 50（旧日志有 `sel 50 in 2`），但**没有背光服务时系统亮度条本身是冻结的**：
+CoreBrightness（CB）不启动内置屏显示模块，滑块不产生任何请求。因此必须先让 CB 接受背光服务。
+
+服务（0243/0249 的 `AppleARMBacklight`，0285 补齐 UniXNU ShengBacklight 文档里的属性集：
+`IODisplayParameters.brightness`、`BrightnessMilliNits`、`backlight-marketing-table`、`Lmin/Lmid/LmaxProduct`、
+`backlight-calibration-parameters`；0287 加 `new-backlight-architecture`；0288 把同一批 16.16 数值再放进
+`IODisplayParameters`，并加 `Display*Luminance*` / `Current-for-*-backlight` 别名）一旦发布，backboardd 会在
+匹配到它的**下一次读取后段错误**，PC 落在 CoreFoundation+0x30a8（`far=0`，`sig 11 code 0xb`），栈里是
+`CoreBrightness+0x14659c -> +0x14b4b8`。
+
+反汇编 `CoreBrightness+0x14659c` 得到的序列是：
+
+```
+IORegistryEntryCreateCFProperty(service, key1, ...)   ; key1 必须是 CFDictionary
+CFGetTypeID(value) == CFDictionaryGetTypeID()
+CFDictionaryGetValue(dict, key2)
+CFNumberGetValue(value, kCFNumberFloatType, &out)     ; value == NULL 时在这里崩
+out /= 65536.0
+```
+
+即某个校准键在字典里没找到。0286 的读取日志显示 CB 依次读 `IODisplayParameters`、
+`new-backlight-architecture`、`backlight-calibration-parameters`；0288 补的键仍未命中，说明 key2 不在这批名字里
+（或 key1 不是这两个字典）。CoreBrightness 的字符串表里与背光相关的键还有
+`backlight-level`、`brightness-nits`、`IOMFBBrightnessLevel`、`PanelMax`、`MaxNitsPanel` 等（后两个已补，仍崩）。
+
+下一步建议（按成本排序）：
+
+1. 从共享缓存里把 `0x1f3b31e38` / `0x1f3b31e58` 两个 CFString 常量的字符串解出来（需要按 dyld chained fixup
+   解码；或换一台有符号的 CoreBrightness），直接得到 key1/key2，比继续猜键省时间。
+2. 试把服务挂到 `IOService::getPlatform()`（Sheng 的做法）而不是 framebuffer 下，排除 CB 沿 provider 链读属性
+   拿到别的对象。
+3. 若 CB 仍不可用，改走 userspace：用 AppSync/重签名替换 backboardd 里 CB 的背光模块（Sheng 对 iPadOS 27 的
+   `BacklightMode.m` 就是只改 backboardd），或做一个读 `IOMFBBrightnessLevel` 的守护进程。
+
+另外两条观察（同一批启动）：
+
+- **黑块消失**：在 181f1aa + 0284 且**不带** `sweetfb_holdflush=1` 的启动里，用户确认黑块没有了；之前带
+  holdflush 的镜像有黑块。尚不能排除偶发，建议用同一内核做 `sweetfb_holdflush=1` 的 A/B 复现来钉死。
+- **半透明/毛玻璃消失**：同一启动里毛玻璃也不见了。很可能是 CA 在没有可用背光/EDR 控制时关闭了 blur/backdrop，
+  而黑块本来正是这些 blur 层在 scanout 上的错误显示；背光服务被 CB 接受后两者可能一起回来，届时要单独修
+  “多层/blur 合成 → scanout” 的显示问题。
+
 > 注意：`COMMAND_MODE_DMA_CTRL` 在发送窗口内被切到 EMBEDDED 模式，若此时正好有一帧
 > command-mode DMA 在排队，可能出现一帧闪烁后自恢复。这是 opt-in 的理由，也是先测中间值
 > 而不是先测两端的理由。
@@ -398,7 +444,7 @@ sysctl -w kern.raphael_dcs_level=120
 
 ### P0 显示帧率、黑块与 scanout 退化
 
-当前确认：单 VIG0 direct scanout 能正常显示；0271/0275 降低了早期 latch/SwapWait 串行开销，且锁存超时低。近期 late-present 采样均值 38.23 swaps/s（峰值 54.17），当前无延迟镜像最近单秒样本 33.73 swaps/s；这些窗口未严格控制同一手势，不能当作稳态基准，未证明持续 60 fps。近期 `scanout_declines` 增长。opt-in `sweetfb_holdflush=1` 在 VIG0 flush 经过 2 ms 仍 pending 时返回 `EBUSY`，由 0275 回退到 CPU copy、不覆盖 pending 地址；这可能增加 copy/延迟，只是诊断，不预设为修复。严格分支前 8 次 decline 会输出 `SWEET SCANOUT: holdflush decline N`，且初始化成功时打印策略，便于从内核日志直接区分该原因与其他 fallback，不再扩展 stats sysctl ABI。
+当前确认：单 VIG0 direct scanout 能正常显示；0271/0275 降低了早期 latch/SwapWait 串行开销，且锁存超时低。近期 late-present 采样均值 38.23 swaps/s（峰值 54.17），当前无延迟镜像最近单秒样本 33.73 swaps/s；这些窗口未严格控制同一手势，不能当作稳态基准，未证明持续 60 fps。近期 `scanout_declines` 增长。opt-in `sweetfb_holdflush=1` 在 VIG0 flush 经过 2 ms 仍 pending 时返回 `EBUSY`，由 0275 回退到 CPU copy、不覆盖 pending 地址；这可能增加 copy/延迟，只是诊断，不预设为修复。初始化成功时打印 `pending-flush policy`；严格分支前 8 次 decline 输出 `SWEET SCANOUT: holdflush decline N`。不扩展 stats sysctl ABI，靠内核日志区分这一特定拒绝原因与其他 fallback。
 
 用户已确认 `sweetfb_scanout=0` 下黑块仍在、开关 direct scanout 对手感影响不明显。`0280` IOVA pin、`0279` timeout-drop 与 `0281` fresh-fence wait 均未解决黑块；`0283` late-present 尚无用户视觉改善证据，保持 opt-in。根因尚未确定。公开 UniXNU GPU/display 指南支持将同一触控区间的 GPU commit/completion、scanout submit、flush/latch 对齐；当前全局 fence snapshot 在 `0281` 中立即通过（`scanout_us_max≈624 µs`），可能没有覆盖 CA 后续才提交的绘制。
 
@@ -551,7 +597,7 @@ print('mismatched hunks:', bad)
 - 补丁：`xnu/patches-11215/0268/0269/0270/0271/0275-*.patch`、`0137-beryllium-reboot-mode.patch`
 - 源码：`xnu/patches-11215/sweet_scanout.c`、`sweet_scanout.h`、`0268-stage-sweet-scanout.sh`
 - 工具：`tools/raphael/check-patch-series.py`（改补丁后必跑）、`capfast.py`、`raphael-base.adt`、`pack-mdp-tests.sh`、`mkboot-raphael.sh`
-- 最近 A/B 镜像：`ios16-reference/validation-20261113/448fd78/boot-late.img`（0283 opt-in）与 `boot-base.img`（同 kernel、无 late-present）；细节见 `ios16-reference/validation-20261113/448fd78/retest/RESULTS.md`。当前手机运行 `boot-base.img` 对照参数。
+- 当前 strict-fallback 日志镜像：`ios16-reference/validation-20261113/448fd78/boot-holdflush-logs.img`（`sweetfb_holdflush=1`，SHA `a50790f0…e51ab801`）；日志见 `retest-holdflush-logs/boot.log`，统计见 `retest-holdflush/RESULTS.md`。0283 对照 A/B 见 `boot-late.img`、`boot-base.img` 与 `retest/RESULTS.md`。
 - 历史基线：`ios16-reference/validation-20261112/boot-0271-recovery.img`（0271 单管，已上机验证可显示）；不是当前构建。
 - 文档：`docs/FORK-SCAN-AND-BUGS.md`、`docs/HANDOVER-GPU-SCANOUT.md`（本文）
 - CI：`.github/workflows/xnu.yml`
