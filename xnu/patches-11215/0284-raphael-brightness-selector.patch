@@ -7,25 +7,25 @@ Two paths reach the panel, and both were missing:
    IODisplayParameters.brightness, which made backboardd find it -- and then
    crash inside CoreBrightness-+0x14659c, in CoreFoundation, with a NULL
    object (reproduced on the phone: sig 11 code 0xb, far 0). UniXNU's
-   ShengBacklight (package/AppleARMBacklight.cpp, verified on iPadOS 17 and 27)
-   documents what CoreBrightness reads: a marketing table (signed 16.16 nits
-   at equally spaced slider positions), the Lmin/Lmid/Lmax product
-   luminances, the calibration dictionary, and the millinit range of
-   IODisplayParameters. This patch publishes that whole set (2/140/500 nits
-   set the slider's scale), takes both request forms (brightness 0..2047, the
-   iPadOS 17/iOS 18 path, and brightness-nits, signed 16.16), and turns the
-   service on by default for raphael -- without it the slider is frozen. A
-   level becomes one DCS 0x51 packet through raphael_dsi.c (sweetfb_blsvc=0
-   turns the service off, raphael_dcs=0 the DCS path).
+   ShengBacklight documents the property set CoreBrightness reads; this patch
+   publishes it (marketing table, Lmin/Lmid/Lmax products, calibration
+   dictionary, IODisplayParameters.brightness and BrightnessMilliNits, 2/140/
+   500 nits), takes both request forms (brightness 0..2047 and brightness-nits
+   signed 16.16), and turns the service on by default for raphael -- without
+   it the slider is frozen. A level becomes one DCS 0x51 packet through
+   raphael_dsi.c (sweetfb_blsvc=0 turns the service off, raphael_dcs=0 the DCS
+   path).
 
-   The crash persisted, so the patch carries the diagnosis of it: every
-   property read and user-client open is logged (0286), new-backlight-
-   architecture is published (0287), and the calibration numbers plus the two
-   "current-for-*-backlight" keys are published in IODisplayParameters as
-   well as in backlight-calibration-parameters (0288). Disassembling
-   CoreBrightness+0x14659c shows the crashing sequence is
-   CFDictionaryGetValue(dict, key) -> CFNumberGetValue(value, kCFNumberFloatType)
-   -> /65536.0 on the result: one of those lookups returned NULL.
+   The crash persisted, so the patch carries the diagnosis: a disassembly of
+   CoreBrightness+0x14659c shows IORegistryEntryCreateCFProperty ->
+   CFDictionaryGetValue(dict, key) -> CFNumberGetValue(value,
+   kCFNumberFloatType) -> /65536.0; one of the lookups returns NULL and the
+   conversion faults. Every property read and user-client open is logged
+   (0286), new-backlight-architecture is published (0287), and the calibration
+   and luminance numbers are published in IODisplayParameters as well as in
+   backlight-calibration-parameters, under both naming schemes the framework's
+   strings show (l*Product/l*Panel/current-for-*-backlight and
+   Display*Luminance*/MaxNitsPanel/PanelMax) (0288).
 
 2. The iOS 18 USB log shows backboardd calling IOMobileFramebuffer selector
    50 (setBrightnessCorrection) with 0..10000 units. externalMethod had no
@@ -34,7 +34,7 @@ Two paths reach the panel, and both were missing:
    the small levels), as ios-raphael patch 0100 does.
 
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1b07788..d0f9444 100644
+index 1b07788..9cc1a1d 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -46,6 +46,7 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -61,7 +61,7 @@ index 1b07788..d0f9444 100644
  	kSweetFBIsMainDisplay           = 18,
  	kSweetFBGetDotPitch             = 28,
  	kSweetFBNotifications           = 72,
-@@ -240,11 +243,164 @@ class AppleARMBacklight : public IOService {
+@@ -240,11 +243,172 @@ class AppleARMBacklight : public IOService {
  	OSDeclareDefaultStructors(AppleARMBacklight);
  public:
  	AppleCLCD *fFB;
@@ -163,6 +163,10 @@ index 1b07788..d0f9444 100644
 +			{ "lMidPanel", sweetBlMidNits << 16 }, { "lMinPanel", sweetBlMinNits << 16 },
 +			{ "current-for-max-backlight", RAPHAEL_DSI_LEVEL_MAX << 16 },
 +			{ "current-for-mid-backlight", (RAPHAEL_DSI_LEVEL_MAX / 2) << 16 },
++				{ "DisplayPanelLuminanceMin", sweetBlMinNits << 16 }, { "DisplayPanelLuminanceMid", sweetBlMidNits << 16 },
++			{ "DisplayPanelLuminanceMax", sweetBlMaxNits << 16 }, { "DisplayProductLuminanceMin", sweetBlMinNits << 16 },
++			{ "DisplayProductLuminanceMid", sweetBlMidNits << 16 }, { "DisplayProductLuminanceMax", sweetBlMaxNits << 16 },
++			{ "MaxNitsPanel", sweetBlMaxNits << 16 }, { "PanelMax", sweetBlMaxNits << 16 },
 +		};
 +		for (unsigned i = 0; i < sizeof(extras) / sizeof(extras[0]); i++) {
 +			if (OSNumber *value = OSNumber::withNumber((uint64_t)extras[i].value, 32)) {
@@ -211,6 +215,10 @@ index 1b07788..d0f9444 100644
 +		const struct { const char *key; uint32_t value; } current[] = {
 +			{ "current-for-max-backlight", RAPHAEL_DSI_LEVEL_MAX << 16 },
 +			{ "current-for-mid-backlight", (RAPHAEL_DSI_LEVEL_MAX / 2) << 16 },
++				{ "DisplayPanelLuminanceMin", sweetBlMinNits << 16 }, { "DisplayPanelLuminanceMid", sweetBlMidNits << 16 },
++			{ "DisplayPanelLuminanceMax", sweetBlMaxNits << 16 }, { "DisplayProductLuminanceMin", sweetBlMinNits << 16 },
++			{ "DisplayProductLuminanceMid", sweetBlMidNits << 16 }, { "DisplayProductLuminanceMax", sweetBlMaxNits << 16 },
++			{ "MaxNitsPanel", sweetBlMaxNits << 16 }, { "PanelMax", sweetBlMaxNits << 16 },
 +		};
 +		for (unsigned i = 0; i < sizeof(current) / sizeof(current[0]); i++) {
 +			if (OSNumber *number = OSNumber::withNumber((uint64_t)current[i].value, 32)) {
@@ -226,7 +234,7 @@ index 1b07788..d0f9444 100644
  class IOMobileFramebufferUserClient;
  
  class AppleCLCD : public IOMobileFramebuffer {
-@@ -900,28 +1056,22 @@ AppleCLCD::start(IOService *provider)
+@@ -900,28 +1064,22 @@ AppleCLCD::start(IOService *provider)
  		PE_parse_boot_argn("sweetfb_blfade", &blfade, sizeof(blfade));
  		if (blfade) {
  			blInit();
@@ -266,7 +274,7 @@ index 1b07788..d0f9444 100644
  			}
  		} else {
  			IOLog("SWEET FB: backlight fade off (sweetfb_blfade=0): black in one step\n");
-@@ -965,6 +1115,7 @@ AppleCLCD::start(IOService *provider)
+@@ -965,6 +1123,7 @@ AppleCLCD::start(IOService *provider)
  
  	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
  	setProperty("external", false);
@@ -274,7 +282,7 @@ index 1b07788..d0f9444 100644
  	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
  	registerService();
  	__atomic_store_n(&sweet_fb_shot_fb, this, __ATOMIC_RELEASE);     /* kern.sweet_fb_shot (patch 0224) */
-@@ -3049,16 +3200,24 @@ AppleCLCD::blInit(void)
+@@ -3049,16 +3208,24 @@ AppleCLCD::blInit(void)
   * (fBlOK cleared, the original value written back as well as possible) when
   * a write fails or does not read back: the caller blacks the screen out instead.
   */
@@ -301,7 +309,7 @@ index 1b07788..d0f9444 100644
  		OSSerialize *ser = OSSerialize::withCapacity(512);
  		if (ser != NULL && d->serialize(ser)) {
  			char name[32];
-@@ -3067,33 +3226,37 @@ AppleARMBacklight::setProperties(OSObject *properties)
+@@ -3067,33 +3234,37 @@ AppleARMBacklight::setProperties(OSObject *properties)
  		}
  		OSSafeReleaseNULL(ser);
  	}
@@ -363,7 +371,7 @@ index 1b07788..d0f9444 100644
  	}
  	return kIOReturnSuccess;
  }
-@@ -4001,6 +4164,34 @@ IOMobileFramebufferUserClient::notify(uint32_t type, const uint64_t *values, uin
+@@ -4001,6 +4172,34 @@ IOMobileFramebufferUserClient::notify(uint32_t type, const uint64_t *values, uin
  	    kIOUserNotifyOptionCanDrop);
  }
  
@@ -398,7 +406,7 @@ index 1b07788..d0f9444 100644
  static uint64_t sweet_fb_logged;        /* selectors already logged (< 64) */
  
  IOReturn
-@@ -4106,6 +4297,32 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -4106,6 +4305,32 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			ret = fFB->swapWait((uint32_t)args->scalarInput[0]);   /* 0216: done = latched on the panel */
  		}
  		break;
