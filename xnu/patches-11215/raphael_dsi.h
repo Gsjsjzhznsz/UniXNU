@@ -41,6 +41,11 @@
 #ifndef _RAPHAEL_DSI_H_
 #define _RAPHAEL_DSI_H_
 
+/* SweetFramebuffer.cpp (C++) calls the two functions below; keep their names unmangled. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -114,5 +119,9 @@ int raphael_dsi_snapshot(char *text, size_t len);
  * the controller reported CMD_MODE_DMA_DONE without an error bit.
  */
 int raphael_dsi_set_brightness(uint32_t level);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _RAPHAEL_DSI_H_ */
