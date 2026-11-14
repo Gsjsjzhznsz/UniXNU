@@ -1,25 +1,31 @@
-raphael: drive panel brightness from the iOS brightness slider (IOMFB selector 50)
+raphael: connect the iOS brightness slider to DCS 0x51 (IOMFB selector 50 + full backlight service)
 
-backboardd already asks the framebuffer for brightness: the iOS 18 USB log shows
-"SWEET FB: backboardd sel 50 in 2/0" -- IOMobileFramebuffer selector 50, the
-setBrightnessCorrection channel CoreBrightness uses -- but externalMethod() had no
-case for it, so the request was dropped (default:) and the panel never changed.
+Two paths reach the panel, and both were missing:
 
-The value is in 0..10000 units (ios-raphael patch 0100 caught backboardd sending
-10000, full, at boot; iOS 18 calls the same selector). The AMOLED takes DCS 0x51
-levels 4..2047, so map the range with the perceptual table from that patch rather
-than linearly -- the low third of the slider needs the small levels to be usable.
-The first value above the panel maximum proves the 0..10000 scale; a value that
-already fits 0..2047 is sent as a DCS level unchanged.
+1. iOS 18's brightness stack only drives a display it can bind a brightness
+   control to. The service added in 0243/0249 published backlight-control and
+   IODisplayParameters.brightness, which made backboardd find it -- and then
+   crash inside CoreBrightness (the 0249 note). UniXNU's ShengBacklight
+   (package/AppleARMBacklight.cpp, verified on iPadOS 17 and 27) shows what
+   CoreBrightness' Display.m reads before it is ready: a marketing table
+   (signed 16.16 nits at equally spaced slider positions), the Lmin/Lmid/Lmax
+   product luminances, the calibration dictionary, and the millinit range of
+   IODisplayParameters. It read the table before it had one, which is the
+   segfault. This patch publishes that whole set (2/140/500 nits set the
+   slider's scale) and takes both request forms: brightness (level 0..2047,
+   the iPadOS 17/iOS 18 path) and brightness-nits (signed 16.16). On raphael
+   the service is now on by default -- without it the slider is frozen -- and
+   a level becomes one DCS 0x51 packet through raphael_dsi.c (sweetfb_blsvc=0
+   turns the service off, raphael_dcs=0 turns the DCS path off).
 
-The packet itself is raphael_dsi.c's (0276), so this patch adds no register code:
-selector 50 calls raphael_dsi_set_brightness(), which is inert unless the boot
-argument raphael_dcs=1 is given. The caller is a user-client thread, so the
-bounded IOSleep in the DCS idle wait is allowed here (it is not on the vsync
-timer). Each changed value is logged with the level and any error.
+2. The iOS 18 USB log shows backboardd calling IOMobileFramebuffer selector
+   50 (setBrightnessCorrection) with 0..10000 units. externalMethod had no
+   case for it, so those requests were dropped; the case maps them onto the
+   same DCS levels with a perceptual table (the low third of the slider needs
+   the small levels), as ios-raphael patch 0100 does.
 
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1b07788..9383738 100644
+index 1b07788..8bc9490 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -46,6 +46,7 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
@@ -38,7 +44,227 @@ index 1b07788..9383738 100644
  	kSweetFBIsMainDisplay           = 18,
  	kSweetFBGetDotPitch             = 28,
  	kSweetFBNotifications           = 72,
-@@ -4001,6 +4003,34 @@ IOMobileFramebufferUserClient::notify(uint32_t type, const uint64_t *values, uin
+@@ -240,11 +242,90 @@ class AppleARMBacklight : public IOService {
+ 	OSDeclareDefaultStructors(AppleARMBacklight);
+ public:
+ 	AppleCLCD *fFB;
++	uint32_t fLevel;                /* 0..2047: last level set; what IODisplayParameters advertises */
++	bool fDcs;                      /* raphael: the panel takes DCS 0x51, not the WLED */
++	void publish(uint32_t level);
+ 	IOReturn setProperties(OSObject *properties) APPLE_KEXT_OVERRIDE;
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleARMBacklight, IOService);
+ 
++/*
++ * 0285: what CoreBrightness/BrightnessControl read from a backlight service before they will drive it. The set is from
++ * UniXNU's ShengBacklight (package/AppleARMBacklight.cpp, verified on iPadOS 17 and 27):
++ *   IODisplayParameters.brightness {min,max,value}          iOS 17 path: levels 0..2047
++ *   IODisplayParameters.BrightnessMilliNits {min,max,value} BrightnessControl: millinits
++ *   backlight-marketing-table                               signed 16.16 nits at equally spaced slider positions;
++ *                                                           CoreBrightness' Display.m fails (it read it before
++ *                                                           loading it: the backboardd segfault of 0249) without it
++ *   LmaxProduct (4 bytes 16.16), LminProduct, LmidProduct   BrightnessControl's luminance scale; at zero the table
++ *                                                           rescales to infinity and every slider position is max
++ *   backlight-calibration-parameters                        the same six luminances as 16.16 numbers
++ * The panel's luminance was not measured, so 2/140/500 nits set the slider's scale, not an absolute brightness.
++ */
++static const uint32_t sweetBlMinNits = 2, sweetBlMidNits = 140, sweetBlMaxNits = 500;
++
++void
++AppleARMBacklight::publish(uint32_t level)
++{
++	OSDictionary *brightness = OSDictionary::withCapacity(3), *milliNits = OSDictionary::withCapacity(3);
++	OSDictionary *parameters = OSDictionary::withCapacity(2);
++	OSNumber *min = OSNumber::withNumber(0ULL, 32), *max = OSNumber::withNumber((uint64_t)RAPHAEL_DSI_LEVEL_MAX, 32);
++	OSNumber *current = OSNumber::withNumber(level > RAPHAEL_DSI_LEVEL_MAX ? RAPHAEL_DSI_LEVEL_MAX : level, 32);
++	OSNumber *minMilli = OSNumber::withNumber((uint64_t)sweetBlMinNits * 1000, 32);
++	OSNumber *maxMilli = OSNumber::withNumber((uint64_t)sweetBlMaxNits * 1000, 32);
++	OSNumber *currentMilli = OSNumber::withNumber((uint64_t)(level > RAPHAEL_DSI_LEVEL_MAX ? RAPHAEL_DSI_LEVEL_MAX : level) *
++	    sweetBlMaxNits * 1000 / RAPHAEL_DSI_LEVEL_MAX, 32);
++	if (brightness && milliNits && parameters && min && max && current && minMilli && maxMilli && currentMilli) {
++		brightness->setObject("min", min);
++		brightness->setObject("max", max);
++		brightness->setObject("value", current);
++		milliNits->setObject("min", minMilli);
++		milliNits->setObject("max", maxMilli);
++		milliNits->setObject("value", currentMilli);
++		parameters->setObject("brightness", brightness);
++		parameters->setObject("BrightnessMilliNits", milliNits);
++		setProperty("IODisplayParameters", parameters);
++	}
++	OSSafeReleaseNULL(min); OSSafeReleaseNULL(max); OSSafeReleaseNULL(current);
++	OSSafeReleaseNULL(minMilli); OSSafeReleaseNULL(maxMilli); OSSafeReleaseNULL(currentMilli);
++	OSSafeReleaseNULL(brightness); OSSafeReleaseNULL(milliNits); OSSafeReleaseNULL(parameters);
++
++	const int32_t table[] = { (int32_t)(sweetBlMinNits << 16), (int32_t)(sweetBlMidNits << 16), (int32_t)(sweetBlMaxNits << 16) };
++	if (OSData *marketing = OSData::withBytes(table, sizeof(table))) {
++		setProperty("backlight-marketing-table", marketing);
++		marketing->release();
++	}
++	if (OSData *lmax = OSData::withBytes(&table[2], sizeof(table[2]))) {
++		setProperty("LmaxProduct", lmax);
++		lmax->release();
++	}
++	if (OSNumber *lmin = OSNumber::withNumber((uint64_t)sweetBlMinNits, 32)) {
++		setProperty("LminProduct", lmin);
++		lmin->release();
++	}
++	if (OSNumber *lmid = OSNumber::withNumber((uint64_t)sweetBlMidNits, 32)) {
++		setProperty("LmidProduct", lmid);
++		lmid->release();
++	}
++	OSDictionary *calibration = OSDictionary::withCapacity(6);
++	if (calibration) {
++		const struct { const char *key; uint32_t nits; } fields[] = {
++			{ "lMinProduct", sweetBlMinNits }, { "lMidProduct", sweetBlMidNits }, { "lMaxProduct", sweetBlMaxNits },
++			{ "lMinPanel", sweetBlMinNits }, { "lMidPanel", sweetBlMidNits }, { "lMaxPanel", sweetBlMaxNits },
++		};
++		for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
++			OSNumber *number = OSNumber::withNumber((uint64_t)fields[i].nits << 16, 32);
++			if (number) {
++				calibration->setObject(fields[i].key, number);
++				number->release();
++			}
++		}
++		setProperty("backlight-calibration-parameters", calibration);
++		calibration->release();
++	}
++}
++
+ class IOMobileFramebufferUserClient;
+ 
+ class AppleCLCD : public IOMobileFramebuffer {
+@@ -900,28 +981,22 @@ AppleCLCD::start(IOService *provider)
+ 		PE_parse_boot_argn("sweetfb_blfade", &blfade, sizeof(blfade));
+ 		if (blfade) {
+ 			blInit();
+-			int blsvc = 0;  /* 0249: off until CoreBrightness can take it (it crashed backboardd); sweetfb_blsvc=1 on */
++			/*
++			 * 0285: on raphael the service is what connects the slider to DCS 0x51, so it is on by default there
++			 * (sweetfb_blsvc=0 turns it off). The WLED boards keep it opt-in as before (0249).
++			 */
++			int blsvc = sweet_board_raphael() ? 1 : 0;
+ 			PE_parse_boot_argn("sweetfb_blsvc", &blsvc, sizeof(blsvc));
+ 			if (blsvc && (fBacklight = OSTypeAlloc(AppleARMBacklight)) != NULL && fBacklight->init() && fBacklight->attach(this)) {
+ 				fBacklight->fFB = this;
++				fBacklight->fDcs = sweet_board_raphael() && raphael_dsi_available();
++				fBacklight->fLevel = fBacklight->fDcs ? 1023 : (uint32_t)(fBlRaw[0] & 0xfff);
+ 				fBacklight->setProperty("backlight-control", true);
+-				OSDictionary *dp = OSDictionary::withCapacity(1), *br = OSDictionary::withCapacity(3);
+-				if (dp && br) {
+-					OSNumber *mn = OSNumber::withNumber(0ULL, 32), *mx = OSNumber::withNumber(4095ULL, 32),
+-					    *va = OSNumber::withNumber((unsigned long long)(fBlRaw[0] & 0xfff), 32);
+-					br->setObject("min", mn);
+-					br->setObject("max", mx);
+-					br->setObject("value", va);
+-					OSSafeReleaseNULL(mn);
+-					OSSafeReleaseNULL(mx);
+-					OSSafeReleaseNULL(va);
+-					dp->setObject("brightness", br);
+-					fBacklight->setProperty("IODisplayParameters", dp);
+-				}
+-				OSSafeReleaseNULL(dp);
+-				OSSafeReleaseNULL(br);
++				fBacklight->publish(fBacklight->fLevel);
+ 				fBacklight->registerService();
+-				IOLog("SWEET FB: backlight service published (0243): backlight-control, brightness 0..4095\n");
++				IOLog("SWEET FB: backlight service published (%s, level %u%s)\n",
++				    fBacklight->fDcs ? "DCS 0x51" : "WLED", fBacklight->fLevel,
++				    fBacklight->fDcs ? "" : (fBlOK ? "" : ": no WLED and no DCS path"));
+ 			}
+ 		} else {
+ 			IOLog("SWEET FB: backlight fade off (sweetfb_blfade=0): black in one step\n");
+@@ -3049,16 +3124,24 @@ AppleCLCD::blInit(void)
+  * (fBlOK cleared, the original value written back as well as possible) when
+  * a write fails or does not read back: the caller blacks the screen out instead.
+  */
+-/* 0243: what iOS sets on the backlight service, logged (first 64 calls), and the brightness taken from it. */
++/*
++ * 0284/0285: what CoreBrightness sets on the backlight service. iPadOS 17/iOS 18 sends {brightness = level 0..2047,
++ * FadePeriod = 16.16 seconds}; iPadOS 27 and later sends brightness-nits (signed 16.16). A level either way ends up
++ * as one DCS 0x51 packet on raphael (through raphael_dsi.c) or, on the WLED boards, as the framebuffer's pending
++ * brightness. setProperties runs on backboardd's thread, so the bounded IOSleep in the DCS idle wait is allowed here.
++ */
+ IOReturn
+ AppleARMBacklight::setProperties(OSObject *properties)
+ {
+ 	static uint32_t logged;
+ 	OSDictionary *d = OSDynamicCast(OSDictionary, properties);
++	uint32_t level;
++	bool have = false;
++
+ 	if (d == NULL) {
+ 		return kIOReturnBadArgument;
+ 	}
+-	if (logged++ < 64) {
++	if (logged++ < 16) {
+ 		OSSerialize *ser = OSSerialize::withCapacity(512);
+ 		if (ser != NULL && d->serialize(ser)) {
+ 			char name[32];
+@@ -3067,33 +3150,37 @@ AppleARMBacklight::setProperties(OSObject *properties)
+ 		}
+ 		OSSafeReleaseNULL(ser);
+ 	}
+-	/*
+-	 * CoreBrightness' own request: "brightness-nits" = nits * 65536 as a SInt32 (it also sets IOMFBBrightnessLevel on
+-	 * the framebuffer, result ignored). Map nits linearly onto the WLED range; sweetfb_blnits = the panel's peak nits
+-	 * (default 500). Digital dimming below the backlight minimum is CB's business (it only engages when the request is
+-	 * under the minimum it read from the service; this service advertises none).
+-	 */
+-	OSNumber *nits = OSDynamicCast(OSNumber, d->getObject("brightness-nits"));
+-	if (nits != NULL && fFB != NULL) {
+-		static uint32_t peak;
+-		if (peak == 0) {
+-			int v = 500;
+-			PE_parse_boot_argn("sweetfb_blnits", &v, sizeof(v));
+-			peak = (v >= 50 && v <= 2000) ? (uint32_t)v : 500;
+-		}
+-		int32_t fx = (int32_t)nits->unsigned32BitValue();
+-		uint64_t lvl = fx > 0 ? (((uint64_t)fx * 4095ULL) + ((uint64_t)peak << 15)) / ((uint64_t)peak << 16) : 0;
+-		fFB->blRequest(lvl > 4095 ? 4095 : (uint32_t)lvl);
+-		return kIOReturnSuccess;
+-	}
+-	OSNumber *n = OSDynamicCast(OSNumber, d->getObject("brightness"));
+-	if (n == NULL) {
++	if (OSNumber *nits = OSDynamicCast(OSNumber, d->getObject("brightness-nits"))) {
++		const int32_t fixed = (int32_t)nits->unsigned32BitValue();   /* signed 16.16 nits */
++		const uint64_t scaled = fixed > 0 ? (((uint64_t)fixed * RAPHAEL_DSI_LEVEL_MAX) +
++		    ((uint64_t)sweetBlMaxNits << 15)) / ((uint64_t)sweetBlMaxNits << 16) : 0;
++		level = scaled > RAPHAEL_DSI_LEVEL_MAX ? RAPHAEL_DSI_LEVEL_MAX : (uint32_t)scaled;
++		have = true;
++	} else if (OSNumber *brightness = OSDynamicCast(OSNumber, d->getObject("brightness"))) {
++		const uint32_t value = brightness->unsigned32BitValue();
++		level = value > RAPHAEL_DSI_LEVEL_MAX ? (value <= 4095 ? value * RAPHAEL_DSI_LEVEL_MAX / 4095 : RAPHAEL_DSI_LEVEL_MAX) : value;
++		have = true;
++	} else {
+ 		OSDictionary *dp = OSDynamicCast(OSDictionary, d->getObject("IODisplayParameters"));
+ 		OSDictionary *br = dp ? OSDynamicCast(OSDictionary, dp->getObject("brightness")) : NULL;
+-		n = br ? OSDynamicCast(OSNumber, br->getObject("value")) : NULL;
++		OSNumber *n = br ? OSDynamicCast(OSNumber, br->getObject("value")) : NULL;
++		level = 0;
++		if (n != NULL && n->unsigned64BitValue() <= 4095) {
++			const uint64_t value = n->unsigned64BitValue();
++			level = value > RAPHAEL_DSI_LEVEL_MAX ? (uint32_t)(value * RAPHAEL_DSI_LEVEL_MAX / 4095) : (uint32_t)value;
++			have = true;
++		}
++	}
++	if (!have) {
++		return kIOReturnSuccess;        /* FadePeriod and other keys: accepted, nothing to do */
+ 	}
+-	if (n != NULL && fFB != NULL && n->unsigned64BitValue() <= 4095) {
+-		fFB->blRequest((uint32_t)n->unsigned64BitValue());
++	fLevel = level;
++	publish(level);
++	if (fDcs) {
++		const int error = raphael_dsi_set_brightness(level);
++		IOLog("SWEET FB: backlight level %u -> DCS 0x51: %d\n", level, error);
++	} else if (fFB != NULL) {
++		fFB->blRequest(level * 4095 / RAPHAEL_DSI_LEVEL_MAX);
+ 	}
+ 	return kIOReturnSuccess;
+ }
+@@ -4001,6 +4088,34 @@ IOMobileFramebufferUserClient::notify(uint32_t type, const uint64_t *values, uin
  	    kIOUserNotifyOptionCanDrop);
  }
  
@@ -73,7 +299,7 @@ index 1b07788..9383738 100644
  static uint64_t sweet_fb_logged;        /* selectors already logged (< 64) */
  
  IOReturn
-@@ -4106,6 +4136,32 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+@@ -4106,6 +4221,32 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
  			ret = fFB->swapWait((uint32_t)args->scalarInput[0]);   /* 0216: done = latched on the panel */
  		}
  		break;
